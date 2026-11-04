@@ -124,7 +124,7 @@ requests and weekly. **Secret scan** (`secret-scan.yml`) runs gitleaks over the 
 Deployment needs an existing resource group and registry, a pushed image digest, approved Entra API and SPA app
 registrations, and model capacity; it never reuses another application's identity, documents or deployments. Check
 model availability, quotas, roles, pricing and permitted regions first. The target is configured in the git-ignored
-`infra/release.local.json`; see [Local release target](infra/README.md#local-release-target-inforeleaselocaljson).
+`infra/release.local.json`; see [Local release target](infra/README.md#local-release-target-infrareleaselocaljson).
 
 - **Authentication.** The browser uses Microsoft Entra authorization code with PKCE and keeps tokens in memory. A
   same-origin endpoint issues a short-lived, one-use WebSocket ticket, so access tokens never appear in URLs. Azure
