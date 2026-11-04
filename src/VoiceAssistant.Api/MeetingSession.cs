@@ -26,10 +26,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private MeetingMetrics.ResponseMeasurement? responseMeasurement;
     private int generationNumber;
     private bool responseActive;
-    private bool responsePending;
-    private ConversationTurn[]? pendingResponseHistory;
-    private string? pendingResponseTurn;
-    private long pendingResponseTimestamp;
+    /// <summary>The reply queued behind the active one, started when that one ends.</summary>
+    private PendingReply? pendingReply;
     private readonly List<string> pendingSpeech = [];
     private long pendingSince;
     /// <summary>A reply started early at a final (Session:EarlyStartAtFinal): its generation and how many gathered segments it covered.</summary>
@@ -74,165 +72,6 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private int speechNumber;
     private int speechRestarts;
     private Task speechRestart = Task.CompletedTask;
-    private sealed record RestartedSpeech(ISpeechStream Stream, SpeechAttempt Attempt);
-
-    /// <summary>
-    /// Holds the errors a restarted recognizer reports before the event loop has taken it over, so none is lost and none
-    /// is mistaken for a failure of a recognizer that is not running yet.
-    /// </summary>
-    private sealed class SpeechAttempt(bool delivered = false)
-    {
-        private readonly object gate = new();
-        private bool handedOver = delivered;
-        private ProviderException? early;
-
-        public bool HoldIfNotHandedOver(ProviderException failure)
-        {
-            lock (gate)
-            {
-                if (handedOver) return false;
-                early ??= failure;
-                return true;
-            }
-        }
-
-        public ProviderException? HandOver()
-        {
-            lock (gate)
-            {
-                handedOver = true;
-                return early;
-            }
-        }
-    }
-    private sealed record SessionEvent(string Kind, object? Value = null, int Generation = 0, long Timestamp = 0, bool ModelResponse = false,
-        bool PrimaryDone = false);
-    private sealed record AudioMessage(byte[] Bytes);
-    private sealed record WireMessage(byte[] Bytes, WebSocketMessageType Type);
-    private sealed record Completion(string Text, string[] Suggestions, Source[] Sources, string Grounding, string ResponseRoute, bool RetrievalPrefetched, bool RespondNow = false);
-    private sealed record KoreanLine(KoreanScope Scope, int Index, string? Korean);
-
-    /// <summary>A reply generated ahead of its final (Session:SpeculativeStart). Nothing of it is sent, logged or measured until the final adopts it.</summary>
-    private sealed record Speculation(string TurnId, string Identity, ConversationTurn[] History, string Route, SessionOptions Settings,
-        string ResponseId, CancellationTokenSource Cancellation, ReplyOutput Output, MeetingMetrics.ResponseMeasurement Measurement,
-        KoreanScope? Scope, Task<RetrievalOutcome>? Prefetched, long StartedAt)
-    {
-        public Task Task { get; set; } = Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// What one reply's generation produces for the outside: events for the client (through the event loop) and failure log
-    /// lines. A reply started at its final writes them straight through. A speculative reply holds them until its final adopts
-    /// it, then hands them over in order as if they were produced just then; a discarded one drops them, so nothing of it is
-    /// ever sent or logged.
-    /// </summary>
-    private sealed class ReplyOutput
-    {
-        private readonly ChannelWriter<SessionEvent> writer;
-        private readonly object gate = new();
-        private List<SessionEvent>? heldEvents;
-        private List<Action>? heldLogs;
-        private bool discarded;
-        private int generation;
-
-        /// <summary>Straight through, as the events of reply <paramref name="number"/>.</summary>
-        public ReplyOutput(ChannelWriter<SessionEvent> writer, int number)
-        {
-            this.writer = writer;
-            generation = number;
-        }
-
-        private ReplyOutput(ChannelWriter<SessionEvent> writer)
-        {
-            this.writer = writer;
-            heldEvents = [];
-            heldLogs = [];
-        }
-
-        /// <summary>For a speculative reply: everything is held until <see cref="Adopt"/>, or dropped by <see cref="Discard"/>.</summary>
-        public static ReplyOutput Held(ChannelWriter<SessionEvent> writer) => new(writer);
-
-        /// <summary>The reply's generation number; a held log line reads it when written, so after adoption it is the adopted one.</summary>
-        public int Generation
-        {
-            get { lock (gate) return generation; }
-        }
-
-        public ValueTask WriteAsync(SessionEvent message, CancellationToken cancellation)
-        {
-            lock (gate)
-            {
-                if (discarded) return ValueTask.CompletedTask;
-                if (heldEvents is not null)
-                {
-                    heldEvents.Add(message);
-                    return ValueTask.CompletedTask;
-                }
-                message = message with { Generation = generation };
-            }
-            return writer.WriteAsync(message, cancellation);
-        }
-
-        /// <summary>A failure log line of this reply: written now, or only once a speculative reply is adopted.</summary>
-        public void Log(Action write)
-        {
-            lock (gate)
-            {
-                if (discarded) return;
-                if (heldLogs is not null)
-                {
-                    heldLogs.Add(write);
-                    return;
-                }
-            }
-            write();
-        }
-
-        /// <summary>
-        /// The speculative reply became reply <paramref name="number"/>: its held log lines are written, and its held events
-        /// are returned in order for the event loop to send now. Later events go straight through.
-        /// </summary>
-        public SessionEvent[] Adopt(int number)
-        {
-            List<SessionEvent> events;
-            List<Action> logs;
-            lock (gate)
-            {
-                generation = number;
-                events = heldEvents ?? [];
-                logs = heldLogs ?? [];
-                heldEvents = null;
-                heldLogs = null;
-            }
-            foreach (var write in logs) write();
-            return events.Select(message => message with { Generation = number }).ToArray();
-        }
-
-        public void Discard()
-        {
-            lock (gate)
-            {
-                discarded = true;
-                heldEvents = null;
-                heldLogs = null;
-            }
-        }
-    }
-
-    /// <summary>Tracks the Korean lines of one response; a response cancelled before it completed never publishes any.</summary>
-    private sealed class KoreanScope(string responseId, string? turnId, ReplyOutput output, MeetingMetrics.ResponseMeasurement? measurement = null)
-    {
-        private readonly string?[] lines = new string?[2];
-        public string ResponseId { get; } = responseId;
-        public string? TurnId { get; } = turnId;
-        /// <summary>Where the translated lines go: with the reply's other events, so a speculative reply holds them too.</summary>
-        public ReplyOutput Output { get; } = output;
-        public MeetingMetrics.ResponseMeasurement? Measurement { get; } = measurement;
-        public volatile bool Abandoned;
-        /// <summary>False when this exact text is already being translated for the line.</summary>
-        public bool Begin(int index, string english) { lock (lines) { if (lines[index] == english) return false; lines[index] = english; return true; } }
-        public bool IsCurrent(int index, string english) { lock (lines) return lines[index] == english; }
-    }
 
     public async Task RunAsync(CancellationToken requestAborted, CancellationToken superseded = default)
     {
@@ -279,11 +118,11 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             {
                 switch (message.Kind)
                 {
-                    case "audio":
+                    case SessionEventKind.Audio:
                         // Dropped while a failed recognizer is being replaced.
                         speech?.Write(((AudioMessage)message.Value!).Bytes);
                         break;
-                    case "transcript":
+                    case SessionEventKind.Transcript:
                         var transcript = (Transcript)message.Value!;
                         if (transcript.Text.Length > 8000)
                             throw new ProviderException("transcript_limit", "Utterance is too long. Reconnect and use shorter utterances.");
@@ -328,10 +167,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             }
                             // Without a settle window every final is answered; with replyOn "questions" only a question or a direct request.
                             else if (!options.QuestionsOnly || ReplyTrigger.Evaluate([transcript.Text], questionsOnly: true) == ReplyDecision.Reply)
-                            {
-                                if (responseActive) PreparePendingResponse(1);
-                                else await StartResponseAsync(lifetime.Token, manual: false, currentSegments: 1);
-                            }
+                                await ReplyOrQueueAsync(1, lifetime.Token);
                         }
                         else
                         {
@@ -343,17 +179,17 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                                 ScheduleSettle(lifetime);
                         }
                         break;
-                    case "speculate" when message.Generation == pauseNumber && pausedPartial is { } paused:
+                    case SessionEventKind.Speculate when message.Generation == pauseNumber && pausedPartial is { } paused:
                         if (speculationTask.IsCompleted) StartSpeculation(paused.Partial, paused.Identity, lifetime.Token);
                         else
                         {
                             // One speculative generation at a time: this pause counts again once the previous one has unwound.
                             var pause = message.Generation;
-                            _ = speculationTask.ContinueWith(_ => EnqueueCallback(new("speculate", Generation: pause), lifetime),
+                            _ = speculationTask.ContinueWith(_ => EnqueueCallback(new(SessionEventKind.Speculate, Generation: pause), lifetime),
                                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                         }
                         break;
-                    case "settle" when message.Generation == settleNumber && pendingSpeech.Count > 0:
+                    case SessionEventKind.Settle when message.Generation == settleNumber && pendingSpeech.Count > 0:
                         // replyOn "questions" answers only a real question or a direct request; any other speech is dropped like a
                         // backchannel, however long it is, and stays in the history as context. "all" decides exactly as before.
                         var decision = ReplyTrigger.Evaluate(pendingSpeech, options.QuestionsOnly);
@@ -372,8 +208,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             var changed = TargetChangedSince(started);
                             pendingSpeech.Clear();
                             if (!changed) break;
-                            if (responseActive && started.Generation != generationNumber) PreparePendingResponse(gathered);
-                            else await StartResponseAsync(lifetime.Token, manual: false, gathered);
+                            await ReplyOrQueueAsync(gathered, lifetime.Token, supersedes: started.Generation);
                             break;
                         }
                         if (decision == ReplyDecision.Wait)
@@ -386,13 +221,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         var currentSegments = pendingSpeech.Count;
                         pendingSpeech.Clear();
                         if (decision == ReplyDecision.Discard) break;
-                        if (responseActive)
-                        {
-                            PreparePendingResponse(currentSegments);
-                        }
-                        else await StartResponseAsync(lifetime.Token, manual: false, currentSegments);
+                        await ReplyOrQueueAsync(currentSegments, lifetime.Token);
                         break;
-                    case "quiet" when message.Generation == settleNumber && pendingSpeech.Count > 0 && earlyReply is null:
+                    case SessionEventKind.Quiet when message.Generation == settleNumber && pendingSpeech.Count > 0 && earlyReply is null:
                     {
                         // Nothing was said since the settle decided to wait, so the speaker is done: answer what was gathered.
                         if (ReplyTrigger.Evaluate(pendingSpeech, options.QuestionsOnly) == ReplyDecision.Discard)
@@ -402,11 +233,10 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         }
                         var quietSegments = pendingSpeech.Count;
                         pendingSpeech.Clear();
-                        if (responseActive) PreparePendingResponse(quietSegments);
-                        else await StartResponseAsync(lifetime.Token, manual: false, quietSegments);
+                        await ReplyOrQueueAsync(quietSegments, lifetime.Token);
                         break;
                     }
-                    case "response.request":
+                    case SessionEventKind.ResponseRequest:
                         if (options.TranscribeOnly) await ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
                         else if (lastTurn is null) await ErrorAsync("no_transcript", "Wait for a finalized utterance.", true, lifetime.Token);
                         else
@@ -416,13 +246,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             await StartResponseAsync(lifetime.Token, manual: true, currentSegments: 1);
                         }
                         break;
-                    case "response.cancel":
+                    case SessionEventKind.ResponseCancel:
                         DiscardSpeculation("cancelled");
                         prefetch?.Cancel();
                         pendingSpeech.Clear(); settleNumber++; earlyReply = null;
                         await CancelResponseAsync(lifetime.Token);
                         break;
-                    case "session.update":
+                    case SessionEventKind.SessionUpdate:
                         if (options.TranscribeOnly)
                         {
                             await ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
@@ -441,15 +271,15 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             replyOn = options.ReplyOn, notes = options.Notes.Length > 0
                         }, lifetime.Token);
                         break;
-                    case "session.stop":
+                    case SessionEventKind.SessionStop:
                         endReason = "stopped";
                         DiscardSpeculation("cancelled");
                         await CancelResponseAsync(lifetime.Token);
                         return;
-                    case "closed":
+                    case SessionEventKind.Closed:
                         endReason = "client_closed";
                         return;
-                    case "fatal":
+                    case SessionEventKind.Fatal:
                         var fatal = (ProviderException)message.Value!;
                         // An error of a recognizer that was already replaced says nothing about the current one.
                         if (message.Generation != 0 && message.Generation != Volatile.Read(ref speechNumber)) break;
@@ -461,7 +291,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         speechRestart = RestartSpeechAsync(speech, failedWith, speechOptions, lifetime);
                         speech = null;
                         break;
-                    case "speech.restarted":
+                    case SessionEventKind.SpeechRestarted:
                         var restarted = (RestartedSpeech)message.Value!;
                         speech = restarted.Stream;
                         // A failure the new recognizer reported before this hand-over is handled like any other.
@@ -470,7 +300,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         speechRestart = RestartSpeechAsync(speech, earlyCode, speechOptions, lifetime);
                         speech = null;
                         break;
-                    case "korean" or "delta" or "complete" or "grounding.unavailable" or "grounding.fallback" or "generation.error":
+                    case SessionEventKind.Korean or SessionEventKind.Delta or SessionEventKind.Complete or SessionEventKind.GroundingUnavailable or SessionEventKind.GroundingFallback or SessionEventKind.GenerationError:
                         await HandleReplyEventAsync(message, lifetime.Token);
                         break;
                 }
@@ -650,10 +480,10 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     {
         var number = Interlocked.Increment(ref speechNumber);
         return provider.StartSpeechAsync(settings,
-            transcript => EnqueueCallback(new("transcript", transcript, Timestamp: clock.GetTimestamp()), lifetime),
+            transcript => EnqueueCallback(new(SessionEventKind.Transcript, transcript, Timestamp: clock.GetTimestamp()), lifetime),
             error =>
             {
-                if (!attempt.HoldIfNotHandedOver(error)) EnqueueCallback(new("fatal", error, number), lifetime);
+                if (!attempt.HoldIfNotHandedOver(error)) EnqueueCallback(new(SessionEventKind.Fatal, error, number), lifetime);
             }, cancellation);
     }
 
@@ -695,7 +525,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 await Task.Delay(SpeechRestartDelay(restart), clock, lifetime.Token);
                 var attempt = new SpeechAttempt();
                 var stream = await StartSpeechAsync(settings, attempt, lifetime, lifetime.Token);
-                try { await events.Writer.WriteAsync(new("speech.restarted", new RestartedSpeech(stream, attempt)), lifetime.Token); }
+                try { await events.Writer.WriteAsync(new(SessionEventKind.SpeechRestarted, new RestartedSpeech(stream, attempt)), lifetime.Token); }
                 catch
                 {
                     await DisposeSpeechAsync(stream);
@@ -713,7 +543,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                     exception.GetType().Name);
                 if (restart >= MaxSpeechRestarts)
                 {
-                    EnqueueCallback(new("fatal", new ProviderException("speech_unavailable", SpeechUnavailableMessage)), lifetime);
+                    EnqueueCallback(new(SessionEventKind.Fatal, new ProviderException("speech_unavailable", SpeechUnavailableMessage)), lifetime);
                     return;
                 }
             }
@@ -782,26 +612,6 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 task.Exception?.InnerException?.GetType().Name ?? "unknown"),
         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 
-    /// <summary>One step of a session's teardown: how long it took from its start (real time), or has taken so far while it runs.</summary>
-    private sealed class TeardownStep
-    {
-        private readonly long started;
-        private long finished;
-
-        public TeardownStep(Task task, long started)
-        {
-            this.started = started;
-            Task = task;
-            _ = task.ContinueWith(_ => Interlocked.Exchange(ref finished, System.Diagnostics.Stopwatch.GetTimestamp()), CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        }
-
-        public Task Task { get; }
-
-        public long Milliseconds => (long)System.Diagnostics.Stopwatch.GetElapsedTime(started,
-            Interlocked.Read(ref finished) is var end and not 0 ? end : System.Diagnostics.Stopwatch.GetTimestamp()).TotalMilliseconds;
-    }
-
     /// <summary>Statements wait for more context, but never longer than this before a reply is offered.</summary>
     private static readonly TimeSpan MaxGatherTime = TimeSpan.FromSeconds(12);
 
@@ -836,7 +646,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         // Enqueued inline when the timer fires (a non-blocking TryWrite), so the settle is ordered before any later speech.
         _ = Task.Delay(delay, clock, lifetime.Token).ContinueWith(task =>
         {
-            if (task.IsCompletedSuccessfully) EnqueueCallback(new("settle", Generation: number), lifetime);
+            if (task.IsCompletedSuccessfully) EnqueueCallback(new(SessionEventKind.Settle, Generation: number), lifetime);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
@@ -849,7 +659,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var number = settleNumber;
         _ = Task.Delay(TimeSpan.FromMilliseconds(features.QuietReplyMs), clock, lifetime.Token).ContinueWith(task =>
         {
-            if (task.IsCompletedSuccessfully) EnqueueCallback(new("quiet", Generation: number), lifetime);
+            if (task.IsCompletedSuccessfully) EnqueueCallback(new(SessionEventKind.Quiet, Generation: number), lifetime);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
@@ -927,7 +737,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var number = ++pauseNumber;
         _ = Task.Delay(SpeculationPause, clock, lifetime.Token).ContinueWith(task =>
         {
-            if (task.IsCompletedSuccessfully) EnqueueCallback(new("speculate", Generation: number), lifetime);
+            if (task.IsCompletedSuccessfully) EnqueueCallback(new(SessionEventKind.Speculate, Generation: number), lifetime);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
@@ -1077,7 +887,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                 idle.CancelAfter(IdleTimeout);
                 var message = await ReceiveAsync(idle.Token);
-                if (message is null) { await events.Writer.WriteAsync(new("closed"), cancellation); return; }
+                if (message is null) { await events.Writer.WriteAsync(new(SessionEventKind.Closed), cancellation); return; }
                 if (message.Type == WebSocketMessageType.Binary)
                 {
                     var now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1086,22 +896,22 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                     audioBudget -= message.Bytes.Length;
                     if (message.Bytes.Length == 0 || message.Bytes.Length % 2 != 0 || audioBudget < 0)
                         throw new ProviderException("invalid_audio", "Audio must be bounded, even-length PCM16LE at real-time speed.");
-                    await events.Writer.WriteAsync(new("audio", new AudioMessage(message.Bytes)), cancellation);
+                    await events.Writer.WriteAsync(new(SessionEventKind.Audio, new AudioMessage(message.Bytes)), cancellation);
                 }
                 else
                 {
                     if (DateTime.UtcNow - window > TimeSpan.FromSeconds(1)) { window = DateTime.UtcNow; commands = 0; }
                     if (++commands > 10) throw new ProviderException("command_limit", "Too many commands.");
                     var command = ParseCommand(message.Bytes);
-                    await events.Writer.WriteAsync(new(command.Type, command.Update), cancellation);
-                    if (command.Type == "session.stop") return;
+                    await events.Writer.WriteAsync(new(command.Kind, command.Update), cancellation);
+                    if (command.Kind == SessionEventKind.SessionStop) return;
                 }
             }
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        catch (OperationCanceledException) { await events.Writer.WriteAsync(new("fatal", new ProviderException("idle_timeout", "Session idle timeout.")), cancellation); }
-        catch (ProviderException exception) { await events.Writer.WriteAsync(new("fatal", exception), cancellation); }
-        catch (WebSocketException) { await events.Writer.WriteAsync(new("closed"), cancellation); }
+        catch (OperationCanceledException) { await events.Writer.WriteAsync(new(SessionEventKind.Fatal, new ProviderException("idle_timeout", "Session idle timeout.")), cancellation); }
+        catch (ProviderException exception) { await events.Writer.WriteAsync(new(SessionEventKind.Fatal, exception), cancellation); }
+        catch (WebSocketException) { await events.Writer.WriteAsync(new(SessionEventKind.Closed), cancellation); }
     }
 
     public static bool IsValidStart(byte[] bytes)
@@ -1122,17 +932,22 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         { return false; }
     }
 
-    private sealed record Command(string Type, SessionUpdate? Update = null);
-
     private static Command ParseCommand(byte[] bytes)
     {
         try
         {
             using var json = JsonDocument.Parse(bytes);
-            var type = json.RootElement.GetProperty("type").GetString();
-            if (type is "response.request" or "response.cancel" or "session.stop") return new(type);
-            if (type == "session.update") return new(type, SessionOptions.ParseUpdate(json.RootElement.GetProperty("options")));
-            throw new ProviderException("invalid_command", "Unsupported command.");
+            var kind = json.RootElement.GetProperty("type").GetString() switch
+            {
+                "response.request" => SessionEventKind.ResponseRequest,
+                "response.cancel" => SessionEventKind.ResponseCancel,
+                "session.stop" => SessionEventKind.SessionStop,
+                "session.update" => SessionEventKind.SessionUpdate,
+                _ => throw new ProviderException("invalid_command", "Unsupported command.")
+            };
+            return kind == SessionEventKind.SessionUpdate
+                ? new(kind, SessionOptions.ParseUpdate(json.RootElement.GetProperty("options")))
+                : new(kind);
         }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
         { throw new ProviderException("invalid_command", "Command must be a JSON object with a supported type and valid options."); }
@@ -1154,13 +969,23 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         return new(data.ToArray(), result.MessageType);
     }
 
-    private void PreparePendingResponse(int currentSegments)
-    {
-        pendingResponseHistory = CreateFocusedHistory(currentSegments);
-        pendingResponseTurn = lastTurn;
+    /// <summary>Queues a reply to the latest gathered speech behind the active reply, replacing any reply queued before it.</summary>
+    private void PreparePendingResponse(int currentSegments) =>
         // Timed from its own final, not from whatever later final arrives while it waits.
-        pendingResponseTimestamp = lastFinalTimestamp;
-        responsePending = true;
+        pendingReply = new(CreateFocusedHistory(currentSegments), lastTurn, lastFinalTimestamp);
+
+    /// <summary>
+    /// Starts a reply to the latest <paramref name="segments"/> gathered utterances, or queues it while another reply is active.
+    /// A reply that supersedes its own early reply (<paramref name="supersedes"/> is that reply's generation) starts at once.
+    /// </summary>
+    private Task ReplyOrQueueAsync(int segments, CancellationToken lifetime, int? supersedes = null)
+    {
+        if (responseActive && supersedes != generationNumber)
+        {
+            PreparePendingResponse(segments);
+            return Task.CompletedTask;
+        }
+        return StartResponseAsync(lifetime, manual: false, segments);
     }
 
     private const string GroundingUnavailableMessage =
@@ -1168,9 +993,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private const string UnavailableNotice = "Grounding is unavailable. Please try again before relying on a factual answer.";
 
     /// <summary>Starts the queued reply, if any, after the active one completed or failed.</summary>
-    private Task StartPendingResponseAsync(CancellationToken lifetime) => responsePending
-        ? StartResponseAsync(lifetime, manual: false, currentSegments: 0,
-            preparedHistory: pendingResponseHistory, preparedTurn: pendingResponseTurn, preparedTimestamp: pendingResponseTimestamp)
+    private Task StartPendingResponseAsync(CancellationToken lifetime) => pendingReply is { } queued
+        ? StartResponseAsync(lifetime, manual: false, currentSegments: 0, queued)
         : Task.CompletedTask;
 
     /// <summary>The fixed completion used when neither the materials nor a general model reply are available.</summary>
@@ -1230,12 +1054,11 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         return earlier.With(focusedConversation);
     }
 
-    private async Task StartResponseAsync(CancellationToken lifetime, bool manual, int currentSegments,
-        ConversationTurn[]? preparedHistory = null, string? preparedTurn = null, long? preparedTimestamp = null)
+    private async Task StartResponseAsync(CancellationToken lifetime, bool manual, int currentSegments, PendingReply? queued = null)
     {
         // A reply that starts any other way answers what a speculative reply was speculating on, so that one is dropped.
         DiscardSpeculation("target_changed");
-        var history = preparedHistory ?? CreateFocusedHistory(currentSegments);
+        var history = queued?.History ?? CreateFocusedHistory(currentSegments);
         if (history.Length == 0) throw new InvalidOperationException("Response history cannot be empty.");
         await CancelResponseAsync(lifetime);
         generation?.Dispose();
@@ -1244,7 +1067,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         // The same deadline as an absolute session-clock timestamp, so a model retry only happens while the reply has time left.
         var deadline = clock.GetTimestamp() + (long)(ResponseDeadline.TotalSeconds * clock.TimestampFrequency);
         responseId = Guid.NewGuid().ToString("N");
-        responseTurn = preparedTurn ?? lastTurn;
+        responseTurn = queued?.Turn ?? lastTurn;
         // The reply keeps the settings it starts with, even when the client changes them while it generates.
         var settings = options;
         var prior = history.Take(history.Length - 1).ToArray();
@@ -1253,7 +1076,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var prefetched = prefetch?.Take(responseTurn!, targetText, responseRoute, prior);
         retrievalPrefetched = prefetched is not null;
         responseActive = true;
-        var measurement = new MeetingMetrics.ResponseMeasurement(preparedTimestamp ?? lastFinalTimestamp, MeetingMetrics.ProviderMode(provider),
+        var measurement = new MeetingMetrics.ResponseMeasurement(queued?.FinalTimestamp ?? lastFinalTimestamp, MeetingMetrics.ProviderMode(provider),
             manual, clock) { Route = responseRoute, ResponseMode = settings.ResponseMode };
         responseMeasurement = measurement;
         measurement.Started();
@@ -1279,9 +1102,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
 
     private async Task CancelResponseAsync(CancellationToken cancellation)
     {
-        responsePending = false;
-        pendingResponseHistory = null;
-        pendingResponseTurn = null;
+        pendingReply = null;
         generation?.Cancel();
         generationNumber++;
         if (!responseActive) return;
@@ -1300,7 +1121,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     {
         switch (message.Kind)
         {
-            case "korean":
+            case SessionEventKind.Korean:
                 var line = (KoreanLine)message.Value!;
                 // A cancel can be handled while this event waits in the queue; a cancelled reply publishes no Korean.
                 if (line.Scope.Abandoned) break;
@@ -1310,7 +1131,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 await SendAsync(koreanMessage, lifetime);
                 line.Scope.Measurement?.KoreanSent(line.Index, line.Korean is not null);
                 break;
-            case "delta" when message.Generation == generationNumber && responseActive:
+            case SessionEventKind.Delta when message.Generation == generationNumber && responseActive:
                 var deltaText = (string)message.Value!;
                 // primaryDone marks, once per response, that the first line is complete; only that delta may be empty.
                 await SendAsync(message.PrimaryDone
@@ -1319,7 +1140,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 if (message.ModelResponse && deltaText.Length > 0) responseMeasurement?.FirstDeltaSent();
                 if (message.ModelResponse && message.PrimaryDone) responseMeasurement?.PrimaryDoneSent();
                 break;
-            case "complete" when message.Generation == generationNumber && responseActive:
+            case SessionEventKind.Complete when message.Generation == generationNumber && responseActive:
                 var completion = (Completion)message.Value!;
                 await SendAsync(new
                 {
@@ -1339,28 +1160,25 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 responseActive = false;
                 await StartPendingResponseAsync(lifetime);
                 break;
-            case "grounding.unavailable" when message.Generation == generationNumber && responseActive:
+            case SessionEventKind.GroundingUnavailable when message.Generation == generationNumber && responseActive:
                 // Non-fatal and sent before the general reply, so older clients still learn why it is not document-based.
                 await ErrorAsync("grounding_unavailable", GroundingUnavailableMessage, true, lifetime);
                 break;
-            case "grounding.fallback" when message.Generation == generationNumber && responseActive:
+            case SessionEventKind.GroundingFallback when message.Generation == generationNumber && responseActive:
                 await CompleteWithoutGroundingAsync(lifetime);
                 await StartPendingResponseAsync(lifetime);
                 break;
-            case "generation.error" when message.Generation == generationNumber && responseActive:
+            case SessionEventKind.GenerationError when message.Generation == generationNumber && responseActive:
                 var failure = (ProviderException)message.Value!;
                 await ErrorAsync(failure.Code, failure.Message, true, lifetime);
                 if (failure.Code == "grounding_unavailable")
                     await CompleteWithoutGroundingAsync(lifetime);
                 else
                 {
-                    var pending = responsePending;
-                    var pendingHistory = pendingResponseHistory;
-                    var pendingTurn = pendingResponseTurn;
+                    // The reply queued behind the failed one still starts next.
+                    var queued = pendingReply;
                     await CancelResponseAsync(lifetime);
-                    responsePending = pending;
-                    pendingResponseHistory = pendingHistory;
-                    pendingResponseTurn = pendingTurn;
+                    pendingReply = queued;
                 }
                 await StartPendingResponseAsync(lifetime);
                 break;
@@ -1382,8 +1200,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 measurement.GroundingReady("disabled");
                 var introduction = ProfileIntroduction.Compose(settings);
                 StartKorean(scope, 0, introduction, new TranslationContext(settings.Topic, settings.Phrases), lifetime);
-                await output.WriteAsync(new("delta", introduction, PrimaryDone: true), cancellation);
-                await output.WriteAsync(new("complete",
+                await output.WriteAsync(new(SessionEventKind.Delta, introduction, PrimaryDone: true), cancellation);
+                await output.WriteAsync(new(SessionEventKind.Complete,
                     new Completion(introduction, [introduction], [], "disabled", "profile", false)), cancellation);
                 return;
             }
@@ -1405,7 +1223,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 {
                     output.Log(() => LogRetrievalFailure(logger, failure));
                     // Announced before the reply, as before, so the client knows this reply is not based on its materials.
-                    await output.WriteAsync(new("grounding.unavailable"), cancellation);
+                    await output.WriteAsync(new(SessionEventKind.GroundingUnavailable), cancellation);
                     groundingUnavailable = true;
                     grounding = new("unavailable", []);
                 }
@@ -1431,13 +1249,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 var primaryDone = update.PrimaryDone && !primaryDoneSent && text.Length > 0;
                 primaryDoneSent |= primaryDone;
                 if (delta.Length > 0 || primaryDone)
-                    await output.WriteAsync(new("delta", delta, ModelResponse: modelResponse, PrimaryDone: primaryDone), cancellation);
+                    await output.WriteAsync(new(SessionEventKind.Delta, delta, ModelResponse: modelResponse, PrimaryDone: primaryDone), cancellation);
             }
             cancellation.ThrowIfCancellationRequested();
             if (text.Length == 0) throw new ProviderException("empty_response", "The model returned no text. Please retry.");
             // A single-line reply is known to be complete only when the stream ends.
             if (!primaryDoneSent)
-                await output.WriteAsync(new("delta", "", ModelResponse: modelResponse, PrimaryDone: true), cancellation);
+                await output.WriteAsync(new(SessionEventKind.Delta, "", ModelResponse: modelResponse, PrimaryDone: true), cancellation);
             var suggestions = ReplySuggestions.Complete(text.ToString(), alternative);
             // Translation starts only once the stream has ended normally: with asynchronous content filtering a line is not
             // checked before then, and a reply the filter stops (response_filtered) must never reach the translation call.
@@ -1450,7 +1268,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             if (classifierFailure is not null && !(classifierFailure is OperationCanceledException && cancellation.IsCancellationRequested))
                 output.Log(() => logger.LogWarning("Turn classifier failed: {ExceptionType}, HTTP status {Status}; the reply is sent without emphasis.",
                     classifierFailure.GetType().Name, HttpStatusText(classifierFailure)));
-            await output.WriteAsync(new("complete",
+            await output.WriteAsync(new(SessionEventKind.Complete,
                 new Completion(text.ToString(), suggestions,
                     DistinctSources(grounding.Documents), grounding.Status, route, prefetched is not null, respondNow),
                 ModelResponse: modelResponse), cancellation);
@@ -1461,8 +1279,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             // A user cancel bumps the generation number, so the event loop drops this stale event.
             if (!lifetime.IsCancellationRequested)
                 await output.WriteAsync(groundingUnavailable
-                    ? new("grounding.fallback")
-                    : new("generation.error", new ProviderException("response_timeout", "Response timed out or was cancelled.")), lifetime);
+                    ? new(SessionEventKind.GroundingFallback)
+                    : new(SessionEventKind.GenerationError, new ProviderException("response_timeout", "Response timed out or was cancelled.")), lifetime);
         }
         catch (Exception exception)
         {
@@ -1489,8 +1307,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 // The search failure was already announced; when the general reply fails too, only the fixed notice follows.
                 // A reply the content filter stopped is withdrawn instead, because that notice would complete it.
                 await output.WriteAsync(groundingUnavailable && !filtered
-                    ? new("grounding.fallback")
-                    : new("generation.error", error), lifetime);
+                    ? new(SessionEventKind.GroundingFallback)
+                    : new(SessionEventKind.GenerationError, error), lifetime);
             }
         }
     }
@@ -1561,7 +1379,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             return;
         }
         if (scope.Abandoned || !scope.IsCurrent(index, english) || lifetime.IsCancellationRequested) return;
-        try { await scope.Output.WriteAsync(new("korean", new KoreanLine(scope, index, korean)), lifetime); }
+        try { await scope.Output.WriteAsync(new(SessionEventKind.Korean, new KoreanLine(scope, index, korean)), lifetime); }
         catch (Exception exception) when (exception is OperationCanceledException or ChannelClosedException) { }
     }
 
