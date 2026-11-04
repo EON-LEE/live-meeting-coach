@@ -13,13 +13,15 @@ every grounded reply loses its documents.
   Meeting retrieval unavailable: quota, transient False, RequestFailedException, HTTP status 402, search code ..., retried False.
   ```
 
-- An evaluation run shows the retrieval-hit and fact rates of grounded items dropping to near zero (a past evaluation
-  run failed this way).
+- An evaluation run shows the retrieval-hit and fact rates of grounded items dropping to near zero.
 
-Kind `quota` with HTTP 402 means the semantic ranker's **free plan** monthly allowance is used up. Other kinds point
-elsewhere: `auth` (401/403) to the runtime identity's **Search Index Data Contributor** role, `throttled` (429) or
-`server_error` (5xx) to service load, and `bad_request` (400) often to a missing `meeting-semantic` configuration
-(fix with `scripts/infra/Update-SemanticIndex.ps1`, see [infra/README.md](../../infra/README.md)).
+Kind `quota` with HTTP 402 means that the semantic ranker's **free plan** monthly allowance is used up. Other kinds
+point elsewhere:
+
+- `auth` (401/403): check the runtime identity's **Search Index Data Contributor** role.
+- `throttled` (429) or `server_error` (5xx): check service load.
+- `bad_request` (400): often a missing `meeting-semantic` configuration. Fix it with
+  `scripts/infra/Update-SemanticIndex.ps1` (see [infra/README.md](../../infra/README.md)).
 
 ## Check
 
@@ -27,9 +29,9 @@ elsewhere: `auth` (401/403) to the runtime identity's **Search Index Data Contri
 az search service show --name <search> --resource-group <group> --subscription <id> --query semanticSearch -o tsv
 ```
 
-`free` can hit this quota, `standard` bills per request after the free allowance, `disabled` fails every semantic
-query. With diagnostics enabled, count the failures in Log Analytics (the table depends on the diagnostic setting's
-destination type, so both are queried):
+`free` can hit this quota. `standard` bills per request after the free allowance. `disabled` fails every semantic
+query. With diagnostics enabled, count the failures in Log Analytics. The table depends on the destination type of the
+diagnostic setting, so the query reads both:
 
 ```kusto
 union isfuzzy=true
