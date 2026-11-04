@@ -11,7 +11,7 @@ import type { ServerEvent } from "./protocol.js";
 import { groundingBadge, groundingDetail, holdButton, holdMenuLabel, readingStatus, type ReadingInput } from "./reading-view.js";
 import { LiveState, answers, leadSentence, meaningTexts, primaryMeaning, suggestionLabels, translatable } from "./live-state.js";
 import { LiveTranslations } from "./live-translation.js";
-import { acknowledgedSettings, deferredUpdateNote, idleStatus, keptNotes, liveStartOptions, notesChipName, parseSettings, pendingUpdate,
+import { acknowledgedSettings, deferredUpdateNote, idleStatus, keptNotes, liveStartOptions, notesChipName, parseSettings, pendingUpdate, startHint,
   settingsKey, stepAnswerSize, withDocumentSearch, withResponseMode, documentSearchOn, type AppliedSettings, type HostSources,
   type LiveSettings, type ResponseMode } from "./live-settings.js";
 import { LiveController, liveLimits, type SourceHooks } from "./live-controller.js";
@@ -132,6 +132,9 @@ $("reply-questions").addEventListener("click", () => changeSettings({ ...setting
 $("toggle-captions").addEventListener("click", () => changeSettings({ ...settings, showCaptions: !settings.showCaptions }));
 $("toggle-korean").addEventListener("click", () => changeSettings({ ...settings, showKorean: !settings.showKorean }));
 $("notes-chip").addEventListener("click", () => settingsDialog.open(notesField));
+/** The start hint stays closed for this page once closed; notes or a topic hide it for good. */
+let hintClosed = false;
+$("start-hint-close").addEventListener("click", () => { hintClosed = true; render(); });
 responseMode.addEventListener("change", () => changeSettings(withResponseMode(settings, responseMode.value as ResponseMode)));
 
 /** A− / A+ step the English answer size. At the smallest or largest size the pressed button turns off, so focus moves to the other. */
@@ -453,6 +456,9 @@ function renderQuick(): void {
   const notesChip = $("notes-chip"), notesSet = String(settings.notes.length > 0), notesName = notesChipName(settings.notes);
   if (notesChip.dataset.set !== notesSet) notesChip.dataset.set = notesSet;
   if (notesChip.getAttribute("aria-label") !== notesName) notesChip.setAttribute("aria-label", notesName);
+  const hint = controller.active || hintClosed ? "" : startHint(settings);
+  setText("start-hint-text", hint); setHidden("start-hint", !hint);
+  setData(notesChip, "nudge", hint ? "true" : undefined);
   setHidden("caption-block", !settings.showCaptions); setHidden("conversation-section", !settings.showCaptions);
   setHidden("answer-meaning", !settings.showKorean); setHidden("alternative-meaning", !settings.showKorean);
   setText("details-summary", settings.showCaptions ? "대화 · 상세 근거" : "상세 근거");

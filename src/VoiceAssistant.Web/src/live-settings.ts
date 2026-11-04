@@ -162,6 +162,14 @@ export function idleStatus(settings: Pick<LiveSettings, "topic" | "notes">): str
 }
 
 /**
+ * The hint under the quick settings before a session starts with neither a topic nor notes: next to the highlighted
+ * "내 메모" chip, it shows what one line of notes looks like. Empty when either is set.
+ */
+export function startHint(settings: Pick<LiveSettings, "topic" | "notes">): string {
+  return settings.topic || settings.notes ? "" : "'내 메모'에 내 입장을 한 줄 적어 두세요 · 예: 나는 PM, 출시 일정은 지키고 싶다";
+}
+
+/**
  * The live page's `session.start` options: its fixed meeting settings plus the chosen document search, topic, Korean,
  * `replyOn` and notes.
  */

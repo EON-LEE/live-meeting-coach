@@ -51,6 +51,47 @@ async function openMenuFrom(page, selector) {
   await expect(page.locator('#live-menu')).toBeVisible();
 }
 
+test('before a start with neither topic nor notes, a closable hint points at 내 메모; notes, a start or closing it hide it', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 400 });
+  await liveFixture(page);
+  const hint = page.locator('#start-hint'), chip = page.locator('#notes-chip'), close = page.getByRole('button', { name: '안내 닫기' });
+  const closeDialog = () => page.getByRole('button', { name: '닫기', exact: true }).click();
+  await expect(hint).toBeVisible();
+  await expect(hint).toHaveText("'내 메모'에 내 입장을 한 줄 적어 두세요 · 예: 나는 PM, 출시 일정은 지키고 싶다닫기");
+  await expect(chip).toHaveAttribute('data-nudge', 'true');
+  await expect(close).toHaveText('닫기');
+  expect(await close.evaluate(button => button.children.length)).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1
+    && [...document.querySelectorAll('.live-status, #start-hint')].every(el => el.scrollWidth <= el.clientWidth + 1))).toBe(true);
+  // Notes hide it, and clearing them brings it back.
+  await chip.click();
+  await page.locator('#my-notes').fill('I own the rollout plan.');
+  await closeDialog();
+  await expect(hint).toBeHidden();
+  await expect(chip).not.toHaveAttribute('data-nudge');
+  await chip.click();
+  await page.locator('#my-notes').fill('');
+  await closeDialog();
+  await expect(hint).toBeVisible();
+  // Hidden while live, back after the stop.
+  await page.locator('#live-toggle').click();
+  await live(page);
+  await expect(hint).toBeHidden();
+  await expect(chip).not.toHaveAttribute('data-nudge');
+  await page.locator('#live-toggle').click();
+  await expect(page.locator('#live-panel')).toHaveAttribute('data-capture', 'off');
+  await expect(hint).toBeVisible();
+  // Closed, it stays closed for this page.
+  await close.click();
+  await expect(hint).toBeHidden();
+  await expect(chip).not.toHaveAttribute('data-nudge');
+  await page.locator('#live-toggle').click();
+  await live(page);
+  await page.locator('#live-toggle').click();
+  await expect(page.locator('#live-panel')).toHaveAttribute('data-capture', 'off');
+  await expect(hint).toBeHidden();
+});
+
 test('the header start/stop and pause buttons run the session like the menu and follow the same state', async ({ page }) => {
   const server = await liveFixture(page);
   const toggle = page.locator('#live-toggle'), pause = page.locator('#live-pause'), status = page.locator('#capture-status');

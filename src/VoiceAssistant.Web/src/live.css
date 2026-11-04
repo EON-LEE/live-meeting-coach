@@ -72,6 +72,16 @@ html, body.live-body { margin: 0; min-height: 100%; }
 .live-quick button[aria-pressed="true"], .live-quick button[data-set="true"] { background: #344d6b; border-color: #a9c9ff; color: #fff; font-weight: 600; }
 .live-quick button[aria-pressed="true"]::before, .live-quick button[data-set="true"]::before { content: "✓ "; content: "✓ " / ""; }
 .live-quick button:focus-visible { outline: 2px solid #a9c9ff; outline-offset: 2px; position: relative; }
+/* Before a start with neither topic nor notes: the hint below the row and the "내 메모" chip it points at share its color. */
+.live-quick button[data-nudge="true"] { border-color: #ffe2aa; box-shadow: 0 0 0 2px rgba(255, 226, 170, .3); }
+.live-start-hint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.live-start-hint[hidden] { display: none; }
+.live-hint-close {
+  font: inherit; font-size: 11px; min-height: 22px; padding: 0 8px; color: #c1cfe2; background: transparent;
+  border: 1px solid #4b5c74; border-radius: 999px; cursor: pointer; touch-action: manipulation;
+}
+.live-hint-close:hover { color: #fff; border-color: #8a9bb3; }
+.live-hint-close:focus-visible { outline: 2px solid #a9c9ff; outline-offset: 2px; }
 
 .live-conversation {
   min-width: 0; padding: 14px 0; border-bottom: 1px solid rgba(255, 255, 255, .11);
