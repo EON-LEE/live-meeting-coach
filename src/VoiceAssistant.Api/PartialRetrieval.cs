@@ -134,7 +134,7 @@ internal sealed class PartialRetrieval : IAsyncDisposable
     }
 
     /// <summary>
-    /// A speculative reply that took this retrieval was discarded unseen (experiment <c>Session:SpeculativeStart</c>), so no
+    /// A speculative reply that took this retrieval was discarded unseen (switch <c>Session:SpeculativeStart</c>), so no
     /// reply waits for it any more. It follows the normal rules again: an identical final reuses it and newer speech cancels
     /// it. One that newer speech already replaced is cancelled now, so an orphaned search never keeps the worker busy.
     /// </summary>

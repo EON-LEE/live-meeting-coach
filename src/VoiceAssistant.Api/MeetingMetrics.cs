@@ -52,13 +52,15 @@ public static class MeetingMetrics
         "voiceassistant.reply.speculative_head_start", "Adopted speculative replies: final transcript time minus the speculative start.");
     private static readonly Counter<long> Resumes = Count("voiceassistant.session.resume", "{session}",
         "Meeting session starts that asked to continue the previous conversation, by outcome: restored, expired or none.");
-    private static readonly Histogram<long> ResumedTurns = Meter.CreateHistogram<long>("voiceassistant.session.resumed_turns", "{turn}",
+    private static readonly Histogram<long> ResumedTurns = Distribution("voiceassistant.session.resumed_turns", "{turn}",
         "Finalized turns a resumed meeting session continued with.");
     static MeetingMetrics() => Meter.CreateObservableGauge(
         "voiceassistant.sessions.active", () => Volatile.Read(ref activeSessions), "{session}", "Open meeting sessions.");
 
     private static Histogram<double> Milliseconds(string name, string description) => Meter.CreateHistogram<double>(name, "ms", description);
     private static Counter<long> Count(string name, string unit, string description) => Meter.CreateCounter<long>(name, unit, description);
+    private static Histogram<long> Distribution(string name, string unit, string description) =>
+        Meter.CreateHistogram<long>(name, unit, description);
 
     public static string ProviderMode(IMeetingProvider provider) => provider switch
     {

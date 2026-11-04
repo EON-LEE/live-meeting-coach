@@ -20,9 +20,11 @@ public sealed class SessionSlotTests
         Assert.NotNull(fresh);
         Assert.False(fresh.Superseded.IsCancellationRequested);
         stale.Dispose();
-        Assert.Null(slots.TryAcquire("user-a"));
+        var third = slots.AcquireAsync("user-a", CancellationToken.None);
+        Assert.True(fresh.Superseded.IsCancellationRequested);
+        Assert.False(third.IsCompleted);
         fresh.Dispose();
-        using var after = slots.TryAcquire("user-a");
+        using var after = await third.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.NotNull(after);
     }
 

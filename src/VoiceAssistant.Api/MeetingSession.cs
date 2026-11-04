@@ -35,12 +35,6 @@ public sealed class SessionSlots
             return active.ContainsKey(objectId) ? null : Register(objectId);
     }
 
-    public IDisposable? TryAcquire(string objectId)
-    {
-        lock (active)
-            return active.Count >= 100 || active.ContainsKey(objectId) ? null : Register(objectId);
-    }
-
     private SessionLease Register(string objectId)
     {
         var slot = new Slot();
@@ -94,9 +88,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private long pendingResponseTimestamp;
     private readonly List<string> pendingSpeech = [];
     private long pendingSince;
-    /// <summary>A reply started early at a final (experiment): its generation and how many gathered segments it covered.</summary>
+    /// <summary>A reply started early at a final (Session:EarlyStartAtFinal): its generation and how many gathered segments it covered.</summary>
     private (int Generation, int Segments)? earlyReply;
-    /// <summary>Experiment: a reply generated on a paused partial before its final, held back until that final adopts or discards it.</summary>
+    /// <summary>Session:SpeculativeStart: a reply generated on a paused partial before its final, held back until that final adopts or discards it.</summary>
     private Speculation? speculation;
     /// <summary>The latest speculative generation; the next starts only after it finished, so at most one runs at a time.</summary>
     private Task speculationTask = Task.CompletedTask;
@@ -104,7 +98,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private (Transcript Partial, string Identity)? pausedPartial;
     private int pauseNumber;
     /// <summary>
-    /// How long the latest partial must stay unchanged before a speculative reply starts (experiment). The Speech service sends
+    /// How long the latest partial must stay unchanged before a speculative reply starts (Session:SpeculativeStart). The Speech service sends
     /// a new partial as each word is processed, and partials carry no punctuation, so until the final (about 1 s after speech
     /// ends on staging) a pause in partials is the only sign that a question is finished; a repeated partial is not, because
     /// silence produces no new partials. 250 ms is the pause PartialRetrieval already waits before it retrieves for a partial:
@@ -115,7 +109,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private int settleNumber;
     private int overflow;
     private SessionOptions options = SessionOptions.Legacy;
-    /// <summary>The recognizer's options: the client's, plus material phrase hints when that experiment is on.</summary>
+    /// <summary>The recognizer's options: the client's, plus material phrase hints when that switch is on.</summary>
     private SessionOptions speechOptions = SessionOptions.Legacy;
     /// <summary>How long a session start waits for material phrase hints that are not cached yet.</summary>
     internal static readonly TimeSpan PhraseHintWait = TimeSpan.FromSeconds(1);
@@ -172,7 +166,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private sealed record Completion(string Text, string[] Suggestions, Source[] Sources, string Grounding, string ResponseRoute, bool RetrievalPrefetched, bool RespondNow = false);
     private sealed record KoreanLine(KoreanScope Scope, int Index, string? Korean);
 
-    /// <summary>A reply generated ahead of its final (experiment). Nothing of it is sent, logged or measured until the final adopts it.</summary>
+    /// <summary>A reply generated ahead of its final (Session:SpeculativeStart). Nothing of it is sent, logged or measured until the final adopts it.</summary>
     private sealed record Speculation(string TurnId, string Identity, ConversationTurn[] History, string Route, SessionOptions Settings,
         string ResponseId, CancellationTokenSource Cancellation, ReplyOutput Output, MeetingMetrics.ResponseMeasurement Measurement,
         KoreanScope? Scope, Task<RetrievalOutcome>? Prefetched, long StartedAt)
@@ -375,7 +369,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                                     pendingSpeech.RemoveRange(0, dropped);
                                     if (earlyReply is { } covered) earlyReply = (covered.Generation, Math.Max(0, covered.Segments - dropped));
                                 }
-                                // Experiment: this final decides a speculative reply, adopting it only when it is exactly the reply
+                                // Speculative start: this final decides a speculative reply, adopting it only when it is exactly the reply
                                 // early start would begin now; that reply already has its retrieval.
                                 var adopted = AdoptableSpeculation(transcript);
                                 // The reply waits out the settle window anyway, so retrieve for this final in the meantime.
@@ -383,7 +377,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                                     prefetch!.Update(transcript, earlierTranscripts.With(conversation.GetRange(0, conversation.Count - 1)));
                                 ScheduleSettle(lifetime, afterFinal: true);
                                 if (adopted is not null) await AdoptSpeculationAsync(adopted, lifetime.Token);
-                                // Experiment: a complete question or request is answered now; the settle above only checks it later.
+                                // Early start: a complete question or request is answered now; the settle above only checks it later.
                                 else if (features.EarlyStartAtFinal && CanStartEarly()) await StartEarlyReplyAsync(lifetime.Token);
                             }
                             // Without a settle window every final is answered; with replyOn "questions" only a question or a direct request.
@@ -395,7 +389,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         }
                         else
                         {
-                            // A speculative reply waiting for its final keeps the retrieval it took (experiment).
+                            // A speculative reply waiting for its final keeps the retrieval it took (speculative start).
                             if (!FollowPartial(transcript, lifetime)) prefetch!.Update(transcript, earlierTranscripts.With(conversation));
                             // Ongoing speech postpones the reply, except a question or request already waiting too long.
                             if (options.ReplySettleMs > 0 && pendingSpeech.Count > 0 &&
@@ -438,7 +432,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         }
                         if (decision == ReplyDecision.Wait)
                         {
-                            // Experiment (Session:QuietReplyMs): a short statement nobody follows up is answered once the room
+                            // Session:QuietReplyMs: a short statement nobody follows up is answered once the room
                             // stays quiet; newer speech re-arms the settle, which voids this timer.
                             if (features.QuietReplyMs > 0) ScheduleQuiet(lifetime);
                             break;
@@ -488,7 +482,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             await ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
                             break;
                         }
-                        // A speculative reply was prepared with the earlier settings, so it is dropped (experiment).
+                        // A speculative reply was prepared with the earlier settings, so it is dropped (speculative start).
                         DiscardSpeculation("cancelled");
                         // A reply already generating keeps the settings it started with; the change applies from the next one,
                         // and a changed replyOn from the next settle.
@@ -586,7 +580,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             // for that. Cleanup that hangs finishes in the background, observed; see ShutdownBudget.
             var shutdown = System.Diagnostics.Stopwatch.GetTimestamp();
             lifetime.Cancel();
-            // A speculative reply still waiting for its final ends with the session, unseen (experiment).
+            // A speculative reply still waiting for its final ends with the session, unseen (speculative start).
             DiscardSpeculation("cancelled");
             // Before anything that can wait: a reconnect of this user waits for the slot, which is released only after this.
             KeepConversation(endReason);
@@ -683,7 +677,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     }
 
     /// <summary>
-    /// The recognizer's options: the client's, plus phrase hints from the caller's own materials when that experiment is on
+    /// The recognizer's options: the client's, plus phrase hints from the caller's own materials when that switch is on
     /// (live sessions only, not practice). The hints reach only the speech phrase list, never prompts or translation, and
     /// only their count is logged.
     /// </summary>
@@ -901,7 +895,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     }
 
     /// <summary>
-    /// Experiment (<see cref="MeetingFeatures.QuietReplyMs"/>): after a settle that decided to wait for more context, a "quiet"
+    /// <see cref="MeetingFeatures.QuietReplyMs"/>: after a settle that decided to wait for more context, a "quiet"
     /// callback answers the gathered speech unless newer speech re-armed the settle (a newer settle number) in the meantime.
     /// </summary>
     private void ScheduleQuiet(CancellationTokenSource lifetime)
@@ -963,11 +957,11 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         earlyReply = (generationNumber, segments);
     }
 
-    /// <summary>Experiment (Session:SpeculativeStart, on top of early start): replies may start on a paused partial.</summary>
+    /// <summary>Session:SpeculativeStart (on top of early start): replies may start on a paused partial.</summary>
     private bool Speculative => features.SpeculativeStart && options.ReplySettleMs > 0 && !options.TranscribeOnly && prefetch is not null;
 
     /// <summary>
-    /// Follows the partials of the utterance being spoken (experiment). A partial that changes what the speculative reply
+    /// Follows the partials of the utterance being spoken (speculative start). A partial that changes what the speculative reply
     /// answers discards it; new words restart the pause timer. True while a speculative reply is still waiting for its final.
     /// </summary>
     private bool FollowPartial(Transcript partial, CancellationTokenSource lifetime)
@@ -1004,7 +998,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     }
 
     /// <summary>
-    /// The latest partial stayed unchanged for <see cref="SpeculationPause"/> (experiment). When the gathered speech ending with
+    /// The latest partial stayed unchanged for <see cref="SpeculationPause"/> (speculative start). When the gathered speech ending with
     /// it passes the early-start rule and nothing else is answering, its reply is generated now, exactly as early start would
     /// begin it at this text's final, and held back until that final adopts or discards it.
     /// </summary>
@@ -1045,7 +1039,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     }
 
     /// <summary>
-    /// This final ends the utterance a speculative reply was generated for (experiment). The reply is adopted only when it is
+    /// This final ends the utterance a speculative reply was generated for (speculative start). The reply is adopted only when it is
     /// exactly the one early start would begin now: same utterance and words (case, punctuation and spacing aside), same
     /// history, route and settings. Otherwise it is discarded, unseen.
     /// </summary>

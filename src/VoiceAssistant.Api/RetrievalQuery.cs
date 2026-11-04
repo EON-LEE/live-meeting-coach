@@ -2,7 +2,6 @@ namespace VoiceAssistant.Api;
 
 internal static class RetrievalQuery
 {
-    internal const int MaximumLength = 4096;
     private const int CurrentLimit = 1536;
     private const int ContextLimit = 350;
 
@@ -16,7 +15,7 @@ internal static class RetrievalQuery
             new[] { 0, older.Length / 2, older.Length - 1 }.Distinct().Select(index => older[index]);
         var context = anchors.Concat(turns.TakeLast(4))
             .Select(turn => Bound(ResponseRouting.Normalize(turn.Text), ContextLimit))
-            .Where(turn => turn.Length > 0).ToArray() ?? [];
+            .Where(turn => turn.Length > 0).ToArray();
         return string.Join(' ', context.Append(current)).Trim();
     }
 

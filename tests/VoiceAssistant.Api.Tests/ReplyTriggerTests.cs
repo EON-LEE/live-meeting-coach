@@ -52,7 +52,7 @@ public sealed class ReplyTriggerTests
     public void DirectRequestsWithoutQuestionMarksGetReplies(string speech)
     {
         Assert.Equal(ReplyDecision.Reply, ReplyTrigger.Evaluate([speech]));
-        Assert.True(ReplyTrigger.ContainsRequest([speech]));
+        // Not a question, so InvitesReply can only be true because the speech is a direct request.
         Assert.True(ReplyTrigger.InvitesReply([speech]));
         Assert.False(ReplyTrigger.ContainsQuestion([speech]));
     }
@@ -77,7 +77,6 @@ public sealed class ReplyTriggerTests
     public void StatementsAndLogisticsAreNotRequests(string speech)
     {
         Assert.Equal(ReplyDecision.Wait, ReplyTrigger.Evaluate([speech]));
-        Assert.False(ReplyTrigger.ContainsRequest([speech]));
         Assert.False(ReplyTrigger.InvitesReply([speech]));
     }
 
