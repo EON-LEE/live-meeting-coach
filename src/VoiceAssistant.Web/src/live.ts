@@ -19,13 +19,9 @@ import { LiveController, liveLimits, type SourceHooks } from "./live-controller.
 import { actionLabels, captureMessage, liveHost, liveMessage, reconnectText, sourceNames, warningMessage, type LiveWarning,
   type PageAction } from "./live-errors.js";
 import { LatencyMarks, debugEnabled } from "./live-latency.js";
+import { $, canFocus, liveDocument, returnFocus, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
+  write } from "./live-dom.js";
 
-let liveDocument = document;
-const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
-  const value = document.getElementById(id) ?? liveDocument.getElementById(id);
-  if (!value) throw new Error(`Missing #${id}`);
-  return value as T;
-};
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
 const toggleButton = $<HTMLButtonElement>("live-toggle"), pauseButton = $<HTMLButtonElement>("live-pause");
 const smallerButton = $<HTMLButtonElement>("answer-smaller"), largerButton = $<HTMLButtonElement>("answer-larger");
@@ -192,7 +188,7 @@ function displayOptions(): DisplayCaptureOptions {
 }
 function showLevel(level: number): void {
   for (const id of ["input-level", "live-level"]) {
-    const meter = liveDocument.getElementById(id) ?? document.getElementById(id);
+    const meter = liveDocument().getElementById(id) ?? document.getElementById(id);
     if (meter instanceof HTMLMeterElement) meter.value = level;
   }
 }
@@ -470,17 +466,14 @@ let pending = false;
 function schedule(): void {
   if (pending) return;
   pending = true;
-  const view = liveDocument.defaultView && !liveDocument.defaultView.closed ? liveDocument.defaultView : window;
+  const shown = liveDocument().defaultView;
+  const view = shown && !shown.closed ? shown : window;
   const run = (): void => { if (!pending) return; pending = false; render(); };
   view.requestAnimationFrame(run);
   view.setTimeout(run, 100);
 }
 let renderedConversation = "";
 
-function write(element: HTMLElement, text: string): void {
-  if (element.textContent !== text) element.textContent = text;
-}
-function setText(id: string, text: string): void { write($(id), text); }
 /** 추천 1 with its first sentence set apart (see leadSentence); the element's text stays exactly the line. */
 function writeAnswer(element: HTMLElement, text: string, reply: boolean): void {
   if (element.textContent === text) return;
@@ -535,14 +528,6 @@ function render(): void {
   renderControls();
 }
 
-function setPressed(id: string, pressed: boolean): void {
-  const element = $(id), value = String(pressed);
-  if (element.getAttribute("aria-pressed") !== value) element.setAttribute("aria-pressed", value);
-}
-function setHidden(id: string, hidden: boolean): void {
-  const element = $(id);
-  if (element.hidden !== hidden) element.hidden = hidden;
-}
 /** Quick settings and what they show or hide. Hidden parts keep their content, so switching one on shows it at once. */
 function renderQuick(): void {
   const search = documentSearchOn(settings);
@@ -625,7 +610,7 @@ function renderSuggestions(): void {
   setText("primary-label", labels.primary);
   setText("alternative-label", labels.alternative);
   const answersSection = panel.querySelector<HTMLElement>(".live-answers")!;
-  if (answersSection.dataset.previous !== String(previous)) answersSection.dataset.previous = String(previous);
+  setData(answersSection, "previous", String(previous));
   // What the reply answers: every final gathered into it (see LiveState), or the latest speech before any reply.
   setText("question-text", display?.question ?? state.turns.find(turn => turn.id === display?.turnId)?.text
     ?? (display ? "이전 대화" : state.latest?.text ?? "영어 대화를 기다리고 있어요."));
@@ -655,9 +640,6 @@ $("hold-answer").addEventListener("click", toggleReadingHold);
 // ---------- Session controls: header buttons and the right-click menu ----------
 
 const item = (action: string): HTMLButtonElement => menu.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!;
-function setTitle(element: HTMLElement, title: string): void {
-  if (element.title !== title) element.title = title;
-}
 /** The menu, and the header's start/stop and pause buttons, which run the same actions with the same states as their items. */
 function renderControls(): void {
   const active = controller.active, ready = controller.isReady;
@@ -694,18 +676,6 @@ function runAction(action: string): void {
 toggleButton.addEventListener("click", () => runAction(toggleButton.dataset.command === "stop" ? "stop" : "start"));
 pauseButton.addEventListener("click", () => runAction("pause"));
 
-/** Whether the element can hold keyboard focus now: still in the panel, shown and enabled. */
-function canFocus(element: Element | null): element is HTMLElement {
-  return element instanceof HTMLElement && panel.contains(element) && !element.matches(":disabled") && element.getClientRects().length > 0;
-}
-/**
- * Focus goes back to the element that opened the menu or the settings dialog, or to the panel when that element is gone.
- * Only closing them calls this: streaming updates never move focus, which may be in Teams or PowerPoint.
- */
-function returnFocus(opener: Element | null): void {
-  (canFocus(opener) ? opener : panel).focus({ preventScroll: true });
-}
-
 function positionMenu(x: number, y: number): void {
   const bounds = panel.getBoundingClientRect();
   const left = Math.max(4, Math.min(x, bounds.width - menu.offsetWidth - 4));
@@ -735,7 +705,7 @@ function openMenu(x: number, y: number): void {
       // A click on another control focuses that control; a click on anything else would leave focus nowhere.
       owner.defaultView?.setTimeout(() => {
         const active = owner.activeElement;
-        if (menu.hidden && (!active || active === owner.body || active === panel)) returnFocus(opener);
+        if (menu.hidden && (!active || active === owner.body || active === panel)) returnFocus(panel, opener);
       });
     };
     owner.addEventListener("pointerdown", onPointer, true); owner.addEventListener("keydown", onKey, true);
@@ -752,7 +722,7 @@ function closeMenu(refocus = true): void {
   if (!opened) return;
   openedMenu = undefined;
   opened.release();
-  if (refocus) returnFocus(opened.opener);
+  if (refocus) returnFocus(panel, opened.opener);
 }
 // Right-click, or Shift+F10 / the menu key on the focused panel or one of its buttons. Inside the open menu it stays as it is.
 panel.addEventListener("contextmenu", event => {
@@ -780,7 +750,7 @@ menu.addEventListener("click", event => {
   if (button.dataset.action) runAction(button.dataset.action);
   // A choice can turn off the button the menu was opened from (stop turns off pause): focus then goes to the panel.
   const focused = panel.ownerDocument.activeElement;
-  if (focused === opener ? !canFocus(opener) : !focused || focused === panel.ownerDocument.body) returnFocus(opener);
+  if (focused === opener ? !canFocus(panel, opener) : !focused || focused === panel.ownerDocument.body) returnFocus(panel, opener);
 });
 
 // ---------- Settings dialog ----------
@@ -820,7 +790,7 @@ settingsDialog.addEventListener("close", () => {
   // may have moved on: only focus left nowhere or in the closed dialog (its opener is gone or turned off) goes to the opener
   // or the panel.
   const focused = panel.ownerDocument.activeElement;
-  if (!focused || focused === panel.ownerDocument.body || settingsDialog.contains(focused)) returnFocus(settingsOpener);
+  if (!focused || focused === panel.ownerDocument.body || settingsDialog.contains(focused)) returnFocus(panel, settingsOpener);
 });
 
 // ---------- Always-on-top floating window (Document Picture-in-Picture, Edge/Chrome) ----------
@@ -851,10 +821,10 @@ async function toggleFloat(): Promise<void> {
   floatingStage.className = "live-stage";
   floatingStage.append(panel);
   floating.document.body.append(floatingStage);
-  liveDocument = floating.document;
+  setLiveDocument(floating.document);
   pipWindow = floating;
   floating.addEventListener("pagehide", () => {
-    stage.append(panel); liveDocument = document; pipWindow = undefined; closeMenu(false); pending = false; render();
+    stage.append(panel); setLiveDocument(document); pipWindow = undefined; closeMenu(false); pending = false; render();
   });
   render();
 }
