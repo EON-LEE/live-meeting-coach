@@ -63,7 +63,7 @@ public sealed class ReadinessTests
     {
         var clock = new ManualClock();
         var readiness = new Readiness();
-        var logger = new ListLogger();
+        var logger = new ListLogger<StartupWarmup>();
         var warmup = new ScriptedWarmup(new WarmupException("speech_connection",
             new HttpRequestException(PrivateDetail, null, HttpStatusCode.ServiceUnavailable)));
         using var service = new StartupWarmup(warmup, readiness, clock, logger);
@@ -108,7 +108,7 @@ public sealed class ReadinessTests
         using var capture = new MetricCapture();
         var clock = new ManualClock();
         var readiness = new Readiness();
-        var logger = new ListLogger();
+        var logger = new ListLogger<StartupWarmup>();
         var warmup = new ScriptedWarmup
         {
             OptionalFailure = new WarmupException("search_connection", new RequestFailedException(0, PrivateDetail))
@@ -289,15 +289,6 @@ public sealed class ReadinessTests
             if (host == Unreachable) throw new HttpRequestException("Synthetic network failure.");
             return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("{}") });
         }
-    }
-
-    private sealed class ListLogger : ILogger<StartupWarmup>
-    {
-        public ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel logLevel) => true;
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Entries.Enqueue((logLevel, formatter(state, exception) + (exception is null ? "" : " " + exception)));
     }
 }
 

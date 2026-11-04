@@ -118,7 +118,7 @@ public sealed class MaterialPhraseHintsTests
     public async Task HintsComeOnlyFromTheCallersMaterialsAreCachedAndRebuiltAfterUploadOrDelete()
     {
         var store = new CountingStore();
-        var logger = new ListLogger();
+        var logger = new ListLogger<MaterialPhraseHints>();
         var hints = new MaterialPhraseHints(store, TimeProvider.System, logger);
         var knowledge = new KnowledgeService(store, TimeProvider.System, hints);
         var rollout = await knowledge.UploadAsync(OwnerA, new("Rollout.txt", "ORN-4 ships with JMAP. JMAP is ready."), CancellationToken.None);
@@ -153,7 +153,7 @@ public sealed class MaterialPhraseHintsTests
     public async Task AFailedBuildYieldsNoHintsLogsOnlyTheExceptionTypeAndIsRetriedNextTime()
     {
         var store = new CountingStore { Failure = new InvalidOperationException("private-cloud-body") };
-        var logger = new ListLogger();
+        var logger = new ListLogger<MaterialPhraseHints>();
         var hints = new MaterialPhraseHints(store, TimeProvider.System, logger);
 
         Assert.Empty(await hints.GetAsync(OwnerA));
@@ -370,15 +370,6 @@ public sealed class MaterialPhraseHintsTests
                     Encoding.UTF8, "application/json")
             };
         }
-    }
-
-    private sealed class ListLogger : ILogger<MaterialPhraseHints>
-    {
-        public ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel logLevel) => true;
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Entries.Enqueue((logLevel, formatter(state, exception) + (exception is null ? "" : " " + exception)));
     }
 }
 

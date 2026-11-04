@@ -135,18 +135,19 @@ public sealed class SearchFailureTests
     [Fact]
     public void LogLineCarriesOnlyTheContentFreeCause()
     {
-        var logger = new ListLogger();
+        var logger = new ListLogger<MeetingSession>();
         MeetingSession.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text")
         {
             Retrieval = new("server_error", true, nameof(RequestFailedException), 503, "ServiceUnavailable", true)
         });
         MeetingSession.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text"));
-        Assert.Equal(2, logger.Lines.Count);
+        var lines = logger.Lines;
+        Assert.Equal(2, lines.Count);
         Assert.Equal("Meeting retrieval unavailable: server_error, transient True, RequestFailedException, HTTP status 503, " +
-            "search code ServiceUnavailable, retried True.", logger.Lines[0]);
+            "search code ServiceUnavailable, retried True.", lines[0]);
         Assert.Equal("Meeting retrieval unavailable: unknown, transient False, ProviderException, HTTP status none, " +
-            "search code none, retried False.", logger.Lines[1]);
-        Assert.All(logger.Lines, line => Assert.DoesNotContain("private", line));
+            "search code none, retried False.", lines[1]);
+        Assert.All(lines, line => Assert.DoesNotContain("private", line));
     }
 
     [Fact]
@@ -187,15 +188,6 @@ public sealed class SearchFailureTests
         }
         public IAsyncEnumerable<string> AnswerAsync(IReadOnlyList<ConversationTurn> conversation, Grounding grounding, CancellationToken cancellation) =>
             throw new NotSupportedException();
-    }
-
-    private sealed class ListLogger : ILogger
-    {
-        public List<string> Lines { get; } = [];
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel logLevel) => true;
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Lines.Add(formatter(state, exception));
     }
 }
 

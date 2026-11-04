@@ -666,7 +666,6 @@ public sealed partial class ApiTests
         private int maxActive;
         public int Retrievals;
         public int Answers => Volatile.Read(ref answers);
-        public int Active => Volatile.Read(ref active);
         public int MaxActive => Volatile.Read(ref maxActive);
         public TaskCompletionSource? Hold { get; set; }
         public bool IgnoreCancellation { get; init; }
