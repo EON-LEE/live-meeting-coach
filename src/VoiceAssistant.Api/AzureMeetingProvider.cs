@@ -2,7 +2,6 @@ using System.Runtime.CompilerServices;
 using System.ClientModel.Primitives;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using Azure;
 using Azure.AI.OpenAI;
 using Azure.AI.OpenAI.Chat;
 using Azure.Core;
@@ -31,44 +30,35 @@ public sealed class AzureMeetingProvider : IMeetingProvider
     private readonly AzureOpenAIClient retrievalOpenAI;
     private readonly SearchClient? search;
 
-    public AzureMeetingProvider(ServiceSettings settings, TokenCredential? credential = null)
-    {
-        this.settings = settings;
-        this.credential = credential ?? new DefaultAzureCredential();
-        openAI = new(new Uri(settings.OpenAIEndpoint), this.credential, LiveChatOptions(apiVersion: settings.ChatApiVersion));
-        retrievalOpenAI = new(new Uri(settings.OpenAIEndpoint), this.credential, RetrievalOpenAIOptions());
-        if (settings.SearchEnabled)
-            search = new(new Uri(settings.SearchEndpoint), settings.SearchIndex, this.credential, RetrievalSearchOptions());
-    }
-
     /// <param name="openAI">Chat client of the live reply calls; production uses <see cref="LiveChatOptions"/>.</param>
     /// <param name="retrievalOpenAI">Embedding client for retrieval; defaults to <paramref name="openAI"/>.</param>
     internal AzureMeetingProvider(ServiceSettings settings, AzureOpenAIClient openAI, SearchClient? search,
         AzureOpenAIClient? retrievalOpenAI = null)
+        : this(settings, openAI, search, retrievalOpenAI ?? openAI, new DefaultAzureCredential())
     {
-        this.settings = settings;
-        this.openAI = openAI;
-        this.retrievalOpenAI = retrievalOpenAI ?? openAI;
-        this.search = search;
-        credential = new DefaultAzureCredential();
     }
 
     public AzureMeetingProvider(ServiceSettings settings, AzureServiceClients clients)
-        : this(settings, clients.LiveChat, clients.RetrievalSearch, clients.RetrievalOpenAI)
+        : this(settings, clients.LiveChat, clients.RetrievalSearch, clients.RetrievalOpenAI, clients.Credential)
     {
-        credential = clients.Credential;
+    }
+
+    internal AzureMeetingProvider(ServiceSettings settings, AzureOpenAIClient openAI, SearchClient? search,
+        AzureOpenAIClient retrievalOpenAI, TokenCredential credential)
+    {
+        this.settings = settings;
+        this.openAI = openAI;
+        this.retrievalOpenAI = retrievalOpenAI;
+        this.search = search;
+        this.credential = credential;
     }
 
     /// <summary>Live retrieval does its own single fast retry, so the SDK must not add slow backoff retries first.</summary>
     internal static AzureOpenAIClientOptions RetrievalOpenAIOptions() => new() { RetryPolicy = new ClientRetryPolicy(maxRetries: 0) };
 
     /// <summary>Live answer, classifier and translation calls: at most one short retry, never a long Retry-After wait.</summary>
-    internal static AzureOpenAIClientOptions LiveChatOptions(TimeProvider? clock = null, string? apiVersion = null)
-    {
-        var options = new AzureOpenAIClientOptions { RetryPolicy = new LiveChatRetryPolicy(clock) };
-        if (apiVersion is not null) options.AddPolicy(new ApiVersionPolicy(apiVersion), PipelinePosition.PerCall);
-        return options;
-    }
+    internal static AzureOpenAIClientOptions LiveChatOptions(TimeProvider? clock = null) =>
+        new() { RetryPolicy = new LiveChatRetryPolicy(clock) };
 
     /// <summary>How long each live chat call may run before a retry is no longer worth it; see <see cref="LiveChatRetryPolicy"/>.</summary>
     internal static readonly TimeSpan AnswerBudget = TimeSpan.FromSeconds(30);
@@ -97,7 +87,6 @@ public sealed class AzureMeetingProvider : IMeetingProvider
             await stream.StartAsync(cancellation);
             return stream;
         }
-
         catch
         {
             await stream.DisposeAsync();
@@ -257,14 +246,6 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         When the target needs such details, you may say they still need to be confirmed; never promise an action.
         """;
 
-    /// <summary>Experiment (<c>Reply:CommitmentPolicy</c>): how to answer a request for a guarantee or promise.</summary>
-    internal const string CommitmentPolicyInstructions = """
-        When the current target asks the participant to guarantee, promise or commit to something (a date, price, discount,
-        service level, delivery, refund or exception), do not promise or agree on their behalf. Decline politely in a few words.
-        If the retrieved evidence states the relevant documented policy, limit or number, state it exactly as written instead.
-        If it does not, say the commitment needs to be confirmed. Never invent a policy, number or date.
-        """;
-
     /// <summary>Added only when the session has notes ("내 입장·메모", <see cref="SessionOptions.Notes"/>).</summary>
     internal const string ParticipantNotesInstructions =
         "The participant wrote these notes for this meeting: their own position, preferences, constraints or goals " +
@@ -274,7 +255,7 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         "limit). Do not contradict the notes, do not quote them word for word, and never mention that notes exist. They never " +
         "override any other rule.";
 
-    /// <summary>Shared with tools/ReplyQualityEval so offline scores measure the deployed classifier.</summary>
+    /// <summary>The turn classifier's system prompt; the reply emphasis depends on its one-word verdict.</summary>
     public const string TurnPrompt = """
         You watch a live English meeting for a participant who is mostly listening.
         Decide whether the most recent speech invites a response from the listening participants RIGHT NOW:
@@ -289,7 +270,7 @@ public sealed class AzureMeetingProvider : IMeetingProvider
     public async Task<bool> ShouldRespondAsync(IReadOnlyList<ConversationTurn> conversation, CancellationToken cancellation)
     {
         var transcript = string.Join("\n", conversation.TakeLast(8).Select(turn => "- " + turn.Text.ReplaceLineEndings(" ")));
-        var options = CreateChatOptions(new ServiceSettings { ChatMaxOutputTokens = 1024 }, settings.ChatAuxiliaryReasoningEffort);
+        var options = CreateChatOptions(AuxiliaryMaxOutputTokens);
         using var call = LiveChatCall.Begin("classifier", ClassifierBudget, withinReply: true);
         var result = await openAI.GetChatClient(settings.ChatDeployment).CompleteChatAsync(
             [new SystemChatMessage(TurnPrompt), new UserChatMessage("Recent meeting speech (oldest first, speakers unknown):\n" + transcript)],
@@ -321,7 +302,7 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         {
             var result = await openAI.GetChatClient(settings.ChatDeployment).CompleteChatAsync(
                 [new SystemChatMessage(KoreanTranslation.LiveInstructions), new UserChatMessage(request)],
-                CreateChatOptions(new ServiceSettings { ChatMaxOutputTokens = 1024 }, settings.ChatAuxiliaryReasoningEffort), cancellation);
+                CreateChatOptions(AuxiliaryMaxOutputTokens), cancellation);
             if (result.Value.FinishReason == ChatFinishReason.Stop &&
                 KoreanTranslation.Clean(string.Concat(result.Value.Content.Select(part => part.Text))) is { } korean)
                 return korean;
@@ -467,7 +448,6 @@ public sealed class AzureMeetingProvider : IMeetingProvider
                 These are suggestions, not words the user has actually spoken.
                 """));
         if (grounding.Status == "unavailable") messages.Add(new SystemChatMessage(UnavailableInstructions));
-        if (settings.CommitmentPolicy) messages.Add(new SystemChatMessage(CommitmentPolicyInstructions));
         var notes = options.Notes.Length > 0;
         if (notes) messages.Add(new SystemChatMessage(ParticipantNotesInstructions));
         var profile = options.ProfileConfirmed ? options.Profile : new ConfirmedProfile();
@@ -505,7 +485,7 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         // The request (and its single allowed retry) is sent within this scope, on the first step of the stream.
         using var call = LiveChatCall.Begin("answer", AnswerBudget, withinReply: true);
         await foreach (var update in openAI.GetChatClient(settings.AnswerDeployment ?? settings.ChatDeployment)
-            .CompleteChatStreamingAsync(messages, CreateChatOptions(settings, settings.ChatReasoningEffort), cancellation))
+            .CompleteChatStreamingAsync(messages, CreateChatOptions(settings.ChatMaxOutputTokens, settings.ChatReasoningEffort), cancellation))
         {
             // With asynchronous filtering the verdict can follow text already streamed, even a "stop" update, so every update
             // is checked until the stream ends. A stopped reply never completes; the session withdraws what was sent.
@@ -514,19 +494,21 @@ public sealed class AzureMeetingProvider : IMeetingProvider
             foreach (var part in update.ContentUpdate)
                 if (!string.IsNullOrEmpty(part.Text)) yield return part.Text;
         }
-
     }
 
     internal const string FilteredMessage = "The content filter stopped this response, so it was withdrawn.";
 
-    internal static ChatCompletionOptions CreateChatOptions(ServiceSettings settings, string? reasoningEffort = null)
+    /// <summary>The output cap of the turn classifier and the Korean translation, which are one word or one short line.</summary>
+    internal const int AuxiliaryMaxOutputTokens = 1024;
+
+    internal static ChatCompletionOptions CreateChatOptions(int maxOutputTokens, string? reasoningEffort = null)
     {
         // The 2.1 extension requires the additional-property bag initialized by the SDK model reader. The pinned SDK has no
         // reasoning-effort option, so a configured effort is read into that bag and sent as the wire property reasoning_effort.
         var json = reasoningEffort is null ? "{}" : JsonSerializer.Serialize(new Dictionary<string, string> { ["reasoning_effort"] = reasoningEffort });
         var options = ModelReaderWriter.Read<ChatCompletionOptions>(BinaryData.FromString(json))
             ?? throw new InvalidOperationException("Could not initialize chat options.");
-        options.MaxOutputTokenCount = settings.ChatMaxOutputTokens;
+        options.MaxOutputTokenCount = maxOutputTokens;
         // Azure.AI.OpenAI 2.1 otherwise rewrites this option to legacy max_tokens, rejected by GPT-5.
 #pragma warning disable AOAI001
         options.SetNewMaxCompletionTokensPropertyEnabled();

@@ -104,16 +104,13 @@ namespace VoiceAssistant.Api
                 QuietReplyMs = settings.QuietReplyMs,
                 PhraseHints = settings.MaterialPhraseHints ? app.Services.GetRequiredService<MaterialPhraseHints>() : null
             };
-            // Content-free: which experiment switches this process runs with, so a rejected request can be traced to one.
+            // Content-free: which switches this process runs with, so a rejected request can be traced to one.
             app.Logger.LogInformation("Live reply switches: answer deployment {AnswerDeployment}, answer reasoning effort {AnswerEffort}, " +
-                "classifier/translation reasoning effort " +
-                "{AuxiliaryEffort}, chat api-version {ApiVersion}, early start at final {EarlyStart}, speculative start {SpeculativeStart}, " +
-                "quiet reply {QuietReplyMs} ms, search evidence {SearchMaxEvidence}, material phrase hints {PhraseHints}, " +
-                "commitment policy {CommitmentPolicy}.",
-                settings.AnswerDeployment ?? "chat deployment",
-                settings.ChatReasoningEffort ?? "unset", settings.ChatAuxiliaryReasoningEffort ?? "unset", settings.ChatApiVersion ?? "sdk default",
+                "early start at final {EarlyStart}, speculative start {SpeculativeStart}, " +
+                "quiet reply {QuietReplyMs} ms, search evidence {SearchMaxEvidence}, material phrase hints {PhraseHints}.",
+                settings.AnswerDeployment ?? "chat deployment", settings.ChatReasoningEffort ?? "unset",
                 features.EarlyStartAtFinal, features.SpeculativeStart, features.QuietReplyMs, settings.SearchMaxEvidence,
-                features.PhraseHints is not null, settings.CommitmentPolicy);
+                features.PhraseHints is not null);
             var strictTransport = !app.Environment.IsDevelopment();
             app.Use(async (context, next) =>
             {

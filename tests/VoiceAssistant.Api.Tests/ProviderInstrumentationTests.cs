@@ -12,7 +12,7 @@ public sealed class ProviderInstrumentationTests
     [Fact]
     public void ChatOptionsOmitTemperatureForReasoningModelCompatibility()
     {
-        var options = AzureMeetingProvider.CreateChatOptions(new ServiceSettings { ChatMaxOutputTokens = 3072 });
+        var options = AzureMeetingProvider.CreateChatOptions(3072);
         Assert.Null(options.Temperature);
         Assert.Equal(3072, options.MaxOutputTokenCount);
         Assert.Equal(2048, ServiceSettings.ReadChatTokenLimit(new ConfigurationBuilder().Build()));
@@ -50,7 +50,7 @@ public sealed class ProviderInstrumentationTests
     public async Task AzureStartupRequiresCredentialBeforeNativeSpeechConnection()
     {
         var credential = new Credential { Failure = new InvalidOperationException("sensitive-credential-error") };
-        var provider = new AzureMeetingProvider(new ServiceSettings
+        var provider = WithCredential(new ServiceSettings
         {
             SpeechRegion = "eastus",
             SpeechResourceId = "/resource",
@@ -67,7 +67,7 @@ public sealed class ProviderInstrumentationTests
     public async Task CancelledStartupDoesNotAcquireTokenOrCreateRecognizer()
     {
         var credential = new Credential();
-        var provider = new AzureMeetingProvider(new ServiceSettings
+        var provider = WithCredential(new ServiceSettings
         {
             OpenAIEndpoint = "https://example.openai.azure.com",
             ChatDeployment = "test"
@@ -77,6 +77,12 @@ public sealed class ProviderInstrumentationTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             provider.StartSpeechAsync(_ => Assert.Fail(), _ => Assert.Fail(), cancellation.Token));
         Assert.Equal(0, credential.Calls);
+    }
+
+    private static AzureMeetingProvider WithCredential(ServiceSettings settings, TokenCredential credential)
+    {
+        var openAI = new Azure.AI.OpenAI.AzureOpenAIClient(new Uri(settings.OpenAIEndpoint), credential);
+        return new AzureMeetingProvider(settings, openAI, null, openAI, credential);
     }
 
     [Fact]

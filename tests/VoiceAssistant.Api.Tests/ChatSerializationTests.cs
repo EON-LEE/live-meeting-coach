@@ -80,7 +80,7 @@ public sealed class ChatSerializationTests
         using var http = new HttpClient(handler);
         var client = new AzureOpenAIClient(new Uri("https://example.openai.azure.com"), new ApiKeyCredential("test-only-key"),
             new AzureOpenAIClientOptions { Transport = new HttpClientPipelineTransport(http) });
-        var options = AzureMeetingProvider.CreateChatOptions(new ServiceSettings { ChatMaxOutputTokens = 2048 }, effort);
+        var options = AzureMeetingProvider.CreateChatOptions(2048, effort);
         await foreach (var _ in client.GetChatClient("test-deployment").CompleteChatStreamingAsync(
             [new UserChatMessage("Original synthetic test prompt.")], options)) { }
         using var json = JsonDocument.Parse(handler.RequestBody!);
