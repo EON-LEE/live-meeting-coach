@@ -8,7 +8,7 @@ anywhere; only extracted text chunks and their embeddings are stored, until the 
 In Azure/production mode all endpoints require the existing `Meeting` authorization policy (Entra bearer JWT,
 delegated `Meeting.Access`, `oid`). Mutating requests (POST/DELETE) also require `OriginPolicy.Allows`
 (exact allowed Origin) and return 403 otherwise. GET permits absent Origin (normal same-origin bearer-only GET)
-but returns403 for a supplied disallowed Origin.
+but returns 403 for a supplied disallowed Origin.
 The owner is **always** the validated `oid`; never accept an owner/principal from the request.
 
 Explicit Development Fake supports offline browser upload/list/delete without Entra only for loopback peer and
@@ -65,9 +65,11 @@ Legacy binary `.doc/.ppt/.xls` and images are rejected with `415` and a message 
 * `allowedPrincipalIds` = `[ <caller oid> ]`.
 * `title` = document title (same for every chunk of the document).
 * `url` = `https://my-materials.invalid/<documentId>` (a deliberately non-routable URL; the UI shows the title instead).
-* `content` = chunk text, ~1,000–1,400 characters with ~150 characters of overlap, split on headings/paragraph/line
-  boundaries (code: on blank lines/declarations), each chunk prefixed with its nearest heading/section label or file path
-  so retrieved text is self-describing.
+* `content` = chunk text of at most 1,400 characters. Each chunk starts with a `<title> | <heading>` line, where the
+  heading is the nearest preceding Markdown heading (a line starting with `#`, at most 160 characters), so retrieved
+  text is self-describing. A chunk ends at the last line break after about 700 characters of the window, otherwise at
+  the size limit. The next chunk overlaps it by 150 characters. Surrogate pairs are never split. (The operator importer
+  `scripts/infra/Import-Knowledge.ps1` uses its own rule: 1,500 characters with 150 overlap.)
 * `updatedAt` = upload time (UTC), `contentVector` = `text-embedding-3-small` 1536 dimensions (batch embeddings, ≤16 inputs
   per request).
 Listing/deleting finds chunks with the existing ACL filter plus `id` prefix handling in code (select `id,title,url,updatedAt`,
