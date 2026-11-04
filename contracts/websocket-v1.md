@@ -144,7 +144,18 @@ new socket. Another user's history is never visible. A client sends the flag onl
 connection became ready, never on a user's Start. The history is kept per server process, so it needs the single replica that tickets and session
 slots already need; a server that does not know the option rejects the start as `invalid_start`.
 
-Text commands: `{"type":"response.request"}`, `{"type":"response.cancel"}`, `{"type":"session.stop"}` and `session.update` (above). Manual request uses the latest finalized utterance; before any final it returns a retryable `no_transcript` error. At most 10 commands/second. A finalized utterance automatically starts a response when idle. While a reply is active, new partials do not cancel it and the latest final is queued; intermediate queued finals remain in recognized history. Completion/failure starts the latest queued reply. Manual regeneration/cancellation and stop invalidate obsolete generation immediately and clear queued work. Clients match active response/turn IDs, retain completed suggestions and label previous-question replies. Socket writes are serialized.
+Text commands: `{"type":"response.request"}`, `{"type":"response.cancel"}`, `{"type":"session.stop"}`, `session.update` (above) and the reply reports `response.feedback` and `response.viewed` (below). Manual request uses the latest finalized utterance; before any final it returns a retryable `no_transcript` error. At most 10 commands/second. A finalized utterance automatically starts a response when idle. While a reply is active, new partials do not cancel it and the latest final is queued; intermediate queued finals remain in recognized history. Completion/failure starts the latest queued reply. Manual regeneration/cancellation and stop invalidate obsolete generation immediately and clear queued work. Clients match active response/turn IDs, retain completed suggestions and label previous-question replies. Socket writes are serialized.
+
+Reply reports tell the server, without any content, how the client's shown replies worked out. `{"type":"response.feedback","responseId":"…","reason":"…"}`
+is a 1-tap verdict on one reply, `reason` one of `good`, `late`, `wrong`, `thin`, `hard_to_read`, `unnecessary`, `missing`.
+`{"type":"response.viewed","items":[{"responseId":"…","visibleMs":1200}]}` reports how long replies stayed visible: 1–20 items, `visibleMs`
+an integer 0..3600000. Neither is acknowledged. A report on a `responseId` that is not among the last 20 replies this session started is
+ignored. A missing `responseId`, a missing or unknown `reason` or any other malformed feedback returns the non-fatal `error`
+`invalid_feedback` (`retryable:false`), and a malformed `response.viewed` returns `invalid_viewed` (`retryable:false`); the session continues.
+Both share the 10 commands/second and 4096-byte limits, and a `transcribeOnly` socket answers them with `error` `code:"transcribe_only"`,
+`retryable:false`. A server that supports them sets `"feedback":true` and `"viewed":true` in `session.ready` (every socket except
+`transcribeOnly`); a client must not send them to a server that did not set the flag, because such a server rejects them as the fatal
+`invalid_command`.
 
 Server events:
 
@@ -152,11 +163,11 @@ For a clear individual/group introduction request with any confirmed profile fie
 
 | type | Additional fields |
 | --- | --- |
-| `session.ready` | `protocolVersion: 1`; `replyKorean: true` only when the client opted in with `replyKorean`; `sessionUpdate: true` when the socket accepts `session.update` (every socket except `transcribeOnly`); `resumedTurns: integer` (1–12) only when a `resumeConversation` start continued that many finalized turns of the previous session |
+| `session.ready` | `protocolVersion: 1`; `replyKorean: true` only when the client opted in with `replyKorean`; `sessionUpdate: true` when the socket accepts `session.update` (every socket except `transcribeOnly`); `feedback: true` and `viewed: true` when it accepts `response.feedback` and `response.viewed` (the same sockets); `resumedTurns: integer` (1–12) only when a `resumeConversation` start continued that many finalized turns of the previous session |
 | `session.updated` | `responseMode`, `replyKorean`, `replyOn`: the effective values after a `session.update`; `notes: boolean`, whether notes are set (never their text). Sent in order with the other events, so it is known which reply started before or after it. A server older than `replyOn` omits that field, and one older than `notes` omits `notes` |
 | `transcript.partial` / `transcript.final` | `turnId: string`, `revision: integer` (increasing within turn), `text: string` (replacement, not delta) |
 | `response.started` | `responseId: string`, `turnId: string`, `segments: integer` (at least 1): how many finalized utterances the reply answers, ending with `turnId`. With `replySettleMs` a reply answers the finals gathered in its wait (and a reply that replaces an early one, all the finals gathered by then), but `turnId` names only the latest of them; `response.request` and a session without `replySettleMs` answer one final. A client that shows what a reply answers (the live web page's **답변 기준 발언** caption) uses it to show all of them. Older servers omit it |
-| `response.delta` | `responseId`, `turnId`, `text: string` (append); `primaryDone: true` once per streamed reply when the primary line is complete (see below) |
+| `response.delta` | `responseId`, `turnId`, `text: string` (append); `primaryDone: true` once per streamed reply when the primary line is complete, and with it optionally `decision: respond\|listen` (see below) |
 | `response.completed` | `responseId`, `turnId`, `text: string` (complete replacement), `suggestions: string[]` (1–2 English replies, primary first), `sources: [{title,url,updatedAt}]`, `grounding`, `responseRoute: transcript\|profile\|knowledge`, `retrievalPrefetched: boolean`, `respondNow: boolean` (not on the fixed grounding-failure notice: a turn classifier's guess that the latest speech invites a response now; it says whether someone should answer, not whether this user should, and the web client does not show it) |
 | `response.korean` | `responseId`, `turnId`, `index: 0\|1` (0 = primary reply, 1 = alternative), and either `korean: string` (1–400 characters, mainly Hangul) or `failed: true` with no `korean` property. Sent only to clients that opted in with `replyKorean` |
 | `response.cancelled` | `responseId`, `turnId` |
@@ -198,6 +209,12 @@ with `response.completed.text` when it arrives. A reply that the content filter 
 must be removed (`response_filtered`, above). `response.completed` timing is unchanged, and clients that ignore the
 property keep working.
 
+The delta with `primaryDone: true` may also carry `decision`: `"respond"` or `"listen"`, the turn classifier's verdict (the same
+guess as `respondNow`) when it had already finished at the moment the primary line was complete. The server never waits for it:
+without the property the verdict is unknown, and `respondNow` on `response.completed` stays authoritative. Deltas without
+`primaryDone` never carry it, and profile replies, which have no classifier, never do. A client can use it to keep showing the
+previous reply instead of swapping in one the classifier says the user need not say (`listen`).
+
 `response.korean` (only for clients that set `replyKorean`) delivers exactly one Korean line per suggestion line of every
 completed reply: `index` 0 for the primary, 1 for the alternative. Each is either a translation or `failed:true` when none could
 be produced, and the client then translates that line itself. Translation runs beside the answer and never delays it. Both
@@ -208,7 +225,7 @@ starts. The server translates with the meeting topic plus the configured phrases
 keeps those names as written, and reads a work-meeting `owner` as the responsible person (담당), not legal ownership. Each
 translation call is limited to 10 seconds. Fake emits `[fake-ko] ` followed by the English line.
 
-Fake: >=640 nonzero audio bytes emit deterministic partial+final once per utterance. Further nonzero audio is ignored until >=16000 consecutive zero bytes (500 ms silence). All-zero audio never fabricates speech. Transcript: `Could you briefly explain the next steps?` Answer: `Let's confirm the goal, agree on the next action, and assign an owner.` Response uses three timed primary deltas; completion includes the synthetic alternative `Let's agree on the goal and next step, then choose an owner.` Fake is synthetic test behavior, not recognition.
+Fake: >=640 nonzero audio bytes emit deterministic partial+final once per utterance. Further nonzero audio is ignored until >=16000 consecutive zero bytes (500 ms silence). All-zero audio never fabricates speech. Transcript: `Could you briefly explain the next steps?` Answer: `Let's confirm the goal, agree on the next action, and assign an owner.` Response uses three timed primary deltas; completion includes the synthetic alternative `Let's agree on the goal and next step, then choose an owner.` A session started with `topic` `fake-listen` hears the statement `We already finished the migration plan and the team will share the final numbers on Friday.` instead (same answer), for which the classifier decides `listen` (`decision:"listen"`, `respondNow:false`); with `replyOn:"questions"` it gets no automatic reply. Fake is synthetic test behavior, not recognition.
 
 ## Grounding
 
