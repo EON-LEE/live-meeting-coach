@@ -65,6 +65,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private KoreanScope? koreanScope;
     /// <summary>How long one reply may take, retrieval and model included (the protocol's response deadline).</summary>
     internal static readonly TimeSpan ResponseDeadline = TimeSpan.FromSeconds(30);
+    /// <summary>A socket that sends nothing (no audio, no command) for this long (real time) ends with idle_timeout.</summary>
+    internal TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(90);
     /// <summary>Recognizer restarts allowed per session after retryable cancellations; a failed restart attempt counts too.</summary>
     internal const int MaxSpeechRestarts = 3;
     private const string SpeechUnavailableMessage = "Speech recognition ended unexpectedly. Reconnect to continue.";
@@ -1073,7 +1075,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             while (!cancellation.IsCancellationRequested)
             {
                 using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                idle.CancelAfter(TimeSpan.FromSeconds(90));
+                idle.CancelAfter(IdleTimeout);
                 var message = await ReceiveAsync(idle.Token);
                 if (message is null) { await events.Writer.WriteAsync(new("closed"), cancellation); return; }
                 if (message.Type == WebSocketMessageType.Binary)
