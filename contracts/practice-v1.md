@@ -78,13 +78,11 @@ Neural read-aloud. Request:
 ```json
 { "text": "The main risk is a slow database migration.", "voice": "coach", "rate": "slow" }
 ```
-* `text`: 1..400 characters of English. `voice`: `coach` (default, the user's own voice model for shadowing) or `partner`
-  (a different voice for the practice partner). `rate`: `normal` (default), `slow` (about 80 % speed) or `fast`
-  (about 125 % speed).
+* `text`: 1..400 characters of English. `voice`: `coach` (default, the voice for shadowing) or `partner` (a different
+  voice for the practice partner). `rate`: `normal` (default), `slow` (about 80 % speed) or `fast` (about 125 % speed).
 * `200` with `Content-Type: audio/mpeg` (Azure Speech neural voice, 24 kHz mono mp3), `Cache-Control: no-store`,
-  body is the whole clip (clips are short). The server chooses the actual Azure voice names; use English (en-US)
-  neural voices that are available in the deployed Speech region (verify against the live resource and record the
-  voice names in `README.md`).
+  body is the whole clip (clips are short). The server uses fixed en-US neural voices: `en-US-JennyNeural` for
+  `coach` and `en-US-GuyNeural` for `partner`.
 * Fake mode returns a short deterministic silent clip. It may use `Content-Type: audio/wav` (a valid tiny PCM WAV) because
   browsers decode either; the client must use the response `Content-Type`.
 * Text is synthesized with SSML built **server-side with XML escaping** (never concatenate raw user text into SSML).
@@ -194,12 +192,10 @@ Korean wrap-up for the whole round.
 meaning (the user's own better sentences preferred). Counts are of the data supplied; never invent that the user said
 something they did not.
 
-## WebSocket change (`websocket-v1.md`)
-`session.start.options.transcribeOnly: true` (boolean, optional, default false) makes the socket a speech-recognition
-channel only: `transcript.partial/final` events are emitted as usual, but there is **no automatic response, no Search and
-no model call**; `response.request` returns `error` code `transcribe_only` (`retryable:false`) and the session continues.
-The option is immutable like the others. It is used by practice mode so that spoken answers are transcribed without
-generating replies. `endSilenceMs` and `phrases` still apply. Update `websocket-v1.md` and its validation tests.
+## Recognition-only WebSocket sessions
+Practice mode records spoken answers through a meeting WebSocket started with `transcribeOnly: true`. Such a session
+emits transcripts but never replies, searches or calls a model. See
+[websocket-v1](websocket-v1.md) for the option and its errors.
 
 ## Fake provider (offline tests)
 Deterministic, no Azure. Fake `enrich`: Korean `"[fake-ko] " + text`; for `reply` pronunciation is one chunk per up to 3

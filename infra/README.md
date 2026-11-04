@@ -1,317 +1,103 @@
-# Azure browser hosting and approved knowledge ingestion
+# Azure infrastructure and knowledge ingestion
 
-This slice deploys an **installation-free browser app**, not the legacy desktop
-client. One Azure Container App serves the built web frontend from the .NET 10
-API's `wwwroot`, with same-origin HTTPS API/WebSocket traffic on container port
-8080. No separate CDN, Teams bot, Graph connector, WorkIQ integration, automatic
-document crawler, or production fake-authentication mode is provisioned.
+`main.bicep` deploys the browser app. One Azure Container App serves the built web client from the API's `wwwroot`;
+API and WebSocket traffic use the same HTTPS origin on container port 8080. No CDN, Teams bot, Graph connector,
+document crawler or fake-authentication mode is provisioned. The image repository (`voice-assistant`) and the default
+ARM deployment name keep the earlier project name.
 
 ## What is provisioned
 
-`main.bicep` targets an **existing resource group**. It creates a Consumption
-Container Apps environment/app, user-assigned runtime identity, Speech account
-with a custom subdomain, Azure OpenAI account with chat and embedding deployments (and an optional live-answer deployment, off by default),
-AI Search, an anonymous-access-disabled Blob documents container, and a
-metric-only no-replica alert. The Azure OpenAI resource exposes the standard
-Azure OpenAI endpoint usable with Foundry/Azure SDKs; this does not create a
-Foundry project or deploy arbitrary model-catalog endpoints.
+`main.bicep` targets an existing resource group. It creates a Consumption Container Apps environment and app with a
+user-assigned runtime identity, a Speech account with a custom subdomain, an Azure OpenAI account with chat and
+embedding deployments (plus an optional live-answer deployment, off by default), Azure AI Search, a Storage account
+with a private Blob `documents` container and a zero-replica alert. With `enableDiagnostics=true` (default) it also
+creates Log Analytics and Application Insights.
 
-The image is a **required, already-pushed ACR digest**, never a fabricated demo
-image. The existing ACR must be in this subscription, use ordinary registry RBAC
-(not ABAC repository permissions), and permit managed-identity image pulls.
-The nested registry module assigns the runtime identity `AcrPull` at that registry.
-The deploying identity needs deployment/resource permissions in the target
-resource group and role-assignment permissions at the relevant scopes, including
-the existing registry. Provider registrations must already be approved.
+The image is a required, already-pushed digest in an existing Azure Container Registry (ACR) in the same
+subscription. The registry must use ordinary RBAC, not ABAC repository permissions. The deploying identity needs
+deployment and role-assignment permissions in the resource group and on the registry. Providers must be registered.
 
 | Identity | Role | Scope |
 | --- | --- | --- |
 | Runtime managed identity | Cognitive Services Speech User | Speech account |
 | Runtime managed identity | Cognitive Services OpenAI User | OpenAI account |
-| Runtime managed identity | Search Index Data Contributor (reads for grounding; writes only each signed-in user's own uploaded meeting materials, ACL = caller object ID) | Search service |
+| Runtime managed identity | Search Index Data Contributor (reads for grounding; writes only each user's own uploaded materials) | Search service |
 | Runtime managed identity | AcrPull | Existing registry |
 | Optional ingestion operator | Search Service Contributor and Search Index Data Contributor | Search service |
 | Optional ingestion operator | Cognitive Services OpenAI User | OpenAI account |
-| Optional ingestion operator | Storage Blob Data Contributor | Documents container only |
+| Optional ingestion operator | Storage Blob Data Contributor | `documents` container only |
 
-The API has **no Blob access and no knowledge-write endpoint**. Set the optional
-`ingestionPrincipalId` to the separately approved operator's Entra **object ID**,
-not an application client ID; its type defaults to `User`. Empty means no
-operator permissions are created. Role assignments are only made by an explicit
-deployment `-Apply`, never by validation or the ingestion script. Allow time for
-RBAC propagation. The operator also needs control-plane read access to the three
-services for the ingestion preflight (for example existing resource-group Reader);
-the ingestion data roles do not grant arbitrary subscription access.
+The API has no Blob access. To create the operator roles, set `ingestionPrincipalId` to the operator's Entra
+**object ID** (not a client ID); its type defaults to `User`. Only `Deploy.ps1 -Apply` creates role assignments.
+The ingestion preflight also needs read access to the three services, for example Reader on the resource group.
 
-Speech/OpenAI/Search have public network endpoints with Entra authentication;
-keys/local authentication are disabled. Search sets `disableLocalAuth: true` and omits
-`authOptions`: Azure rejects `aadOrApiKey` options when local authentication is
-disabled. Storage explicitly sets **publicNetworkAccess: Disabled**, matching
-the observed `StorageAccount_PublicNetwork_Modify` governance policy, with no
-override switch to bypass it. Use the [private ingestion route](private-ingestion/README.md)
-for the deployed baseline: a dedicated Blob private endpoint, DNS and manual
-job with a separate identity. Local operator ingestion requires an already
-approved private network path; a successful Entra login does not bypass the
-storage network boundary. Source blobs are operator-only archives, not
-browser-readable citation links.
+Speech, Azure OpenAI and Search accept Entra authentication only; keys and local authentication are disabled. Search
+omits `authOptions`, because Azure rejects them when local authentication is disabled. Storage sets
+`publicNetworkAccess: Disabled`, with no override. To load documents into the deployed baseline, use the
+[private ingestion route](private-ingestion/README.md). Local ingestion needs an approved private network path; an
+Entra sign-in does not bypass the storage network boundary. Source blobs are operator-only archives.
 
 ## Prerequisites and deployment
 
 ### Local release target (`infra/release.local.json`)
 
-Environment identifiers stay out of Git. Copy `infra/release.example.json` to
-`infra/release.local.json` (ignored by `*.local.json`) and fill in:
+Environment identifiers stay out of Git. Copy `infra/release.example.json` to `infra/release.local.json` (ignored
+through `*.local.json`) and fill in:
 
 | Field | Used by | Meaning |
 | --- | --- | --- |
 | `version` | all | Always `1` |
-| `subscriptionId`, `tenantId` | every online script | The only subscription/tenant the scripts may touch (the subscription lock) |
-| `projectId` | `Prepare-Azure.ps1`, Az.Accounts adapter | GUID in the `projectId` ownership tag on bootstrap resources; generate one with `[guid]::NewGuid()` for a new environment |
+| `subscriptionId`, `tenantId` | every online script | The only subscription and tenant the scripts may touch |
+| `projectId` | every online script | Ownership-tag GUID; generate one with `[guid]::NewGuid()` for a new environment |
 | `resourceGroup`, `registryName`, `imageRepository` | `scripts/release/Release.ps1` | Production resource group, existing ACR name (without `.azurecr.io`), image repository (`voice-assistant`) |
-| `productionApp`, `stagingApp` | `scripts/release/Release.ps1` | Container App names; optional `stagingResourceGroup` when staging lives elsewhere |
+| `productionApp`, `stagingApp` | `scripts/release/Release.ps1` | Container App names; add `stagingResourceGroup` when staging is in another group |
 
-`Deploy.ps1` (online modes), `Prepare-Azure.ps1`, `Import-Knowledge.ps1`,
-`Update-SemanticIndex.ps1` and the Az.Accounts adapter read the subscription,
-tenant and ownership tag only from this file. A missing file, a placeholder or a
-mismatching `-SubscriptionId`/`-TenantId` stops them before any Azure request;
-errors name the field, never its value. Set `VOICE_ASSISTANT_RELEASE_CONFIG` to
-use another path (the offline tests point it at a synthetic fixture). Offline
-modes (the defaults) do not need the file.
-
-### Releasing a new image
-
-`scripts/release/Release.ps1` builds the clean `origin/main` commit in ACR, deploys
-the digest to the staging app, checks health and security headers, runs an optional
-smoke test and, only with `-Production`, promotes the same digest and prints the
-rollback commands. See [scripts/release/README.md](../scripts/release/README.md) and
-the [release and rollback runbook](../docs/runbooks/release-and-rollback.md).
-
-### Readiness and optional dedicated-project bootstrap
-
-`scripts\infra\Prepare-Azure.ps1` closes the resource-group/ACR prerequisite
-without adopting unrelated resources. It is locked to the subscription and tenant
-in your git-ignored `infra/release.local.json` (see
-[Local release target](#local-release-target-inforeleaselocaljson)); without that
-file every online check fails closed. Default **Plan** is offline; **Check**
-is bounded/read-only; **Apply** requires valid concrete configuration, a recent
-documented positive cost estimate, explicit `-CostApproved`, and an existing
-authorized identity. Never use synthetic fixture prices as a real cost review.
-
-Copy `bootstrap.example.json` to ignored `bootstrap.local.json`, then supply a
-dedicated resource group (for example `rg-<project>`), approved region,
-globally unique registry name and SKU. `estimatedMonthlyCostUsd` covers the
-planned scope; `estimateDateUtc` must be UTC `yyyy-MM-dd` within 30 days and
-`pricingReference` must identify the actual cost review. Set `costScope` to
-`Bootstrap` for RG/ACR-only costs or `Application` for the full planned application
-including the registry. Legacy configurations omitting this field are treated
-as bootstrap-only. **Application checks/apply reject a bootstrap-only review**;
-update the amount, date and reference together with `costScope: "Application"`.
-This records the operator's reviewed scope; it does not independently verify the
-price calculation or turn a monthly estimate into a maximum. These are review
-evidence, not an automated price quote, cap or resource budget.
-
-```powershell
-# Offline: produces BLOCKED identity/availability, never fake deployment readiness.
-.\scripts\infra\Prepare-Azure.ps1 -ConfigFile .\infra\bootstrap.local.json `
-  -ReportPath C:\reports\bootstrap-plan.json -Plan
-
-# Existing Az.Accounts identity, explicitly scoped; no interactive login.
-.\scripts\infra\Prepare-Azure.ps1 -ConfigFile .\infra\bootstrap.local.json `
-  -ReportPath C:\reports\bootstrap-check.json -AuthProvider AzPowerShell -Check
-
-# Creates only absent project RG + ACR; does not build images, create app registrations,
-# change another project's resources, register providers, or grant roles.
-.\scripts\infra\Prepare-Azure.ps1 -ConfigFile .\infra\bootstrap.local.json `
-  -ReportPath C:\reports\bootstrap-apply.json -AuthProvider AzPowerShell -Apply -CostApproved
-```
-
-The report directory must exist. The report is initialized before any mutation
-so a failed/interrupted run does not leave a previous success report in place.
-Groups/registries are tagged `managedBy=voice-assistant-bootstrap` and
-`projectId=<projectId from infra/release.local.json>`. Repeated runs reuse matching
-resources unchanged; unowned/untagged resources, location/SKU mismatches,
-admin-enabled registries and incompatible ABAC mode fail instead of being
-retagged or altered. Serialize bootstrap ownership with other operators; a
-concurrent creator can invalidate any read-before-create preview. No automatic
-cleanup/rollback/deletion occurs after partial failure.
-
-`-AuthProvider Auto` (default) checks the configured Azure CLI account metadata,
-installed azd check-status, and normal Az.Accounts context/token/ARM access.
-`AzPowerShell` uses the matching existing **AzureCloud** context explicitly via
-`-DefaultProfile` without changing the global context. Successful token
-acquisition alone is not enough: the exact subscription must be readable and
-enabled in the expected tenant. Tokens never enter reports, files or environment
-variables. No login, MFA bypass, credential enrollment or token-cache inspection
-is attempted. azd identity is discovery-only; provisioning uses Azure CLI or
-Az.Accounts. `AzureCli` explicitly selects CLI only; an absent CLI account does
-not block Auto when an existing Az.Accounts identity is verified.
-
-Portable CLI installations are supported by **Prepare**, **Deploy**, and
-**Import-Knowledge** without PATH/global configuration changes:
-
-```powershell
-$portable = @{
-  AzPath = 'C:\approved-tools\azure-cli\Scripts\python.exe'
-  AzPrefix = @('-m', 'azure.cli')
-}
-.\scripts\infra\Prepare-Azure.ps1 @portable -ReportPath C:\reports\readiness.json -Check
-```
-
-All CLI launches are noninteractive, bounded, argument-array-safe and suppress
-raw stdout/stderr on error. Timeouts kill only the launched PID tree; a timed-out
-Azure mutation may still complete server-side, so its outcome is **Unknown**
-and must be read back before retry. Automatic CLI extension installation is
-disabled per process. No credentials are bridged from Az.Accounts into CLI.
-All readiness Azure reads, Az identity verification, and ARM validation/what-if
-commands allow 90 seconds each for context/token initialization and ARM response.
-The azd discovery-only probe remains capped at 20 seconds. Timeout diagnostics
-preserve the operation, for example `REGISTRY_READ_TIMEOUT`,
-`IMAGE_DIGEST_READ_TIMEOUT` and `ARM_PREVIEW_TIMEOUT`, without printing raw
-provider errors. `REGISTRY_NAME_CHECK_TIMEOUT` means availability is **unknown**,
-not that the name is occupied; do not pick a different registry to conceal a
-timeout. Mutation budgets remain separate (group 120 seconds, ACR 300 seconds,
-application deployment 900 seconds); none are automatically retried.
-Knowledge ingestion also accepts `-AuthProvider AzPowerShell` for the existing
-approved operator context; the default remains `AzureCli`. Its metadata reads and
-Search/OpenAI/Storage token requests use the explicit subscription/tenant.
-SecureString token values are transiently converted only inside the captured
-subprocess pipe and the caller's in-memory HTTP token cache. Never invoke the
-adapter's `account get-access-token` branch directly to a console or redirect it
-to a file; use `Import-Knowledge.ps1`, which prints no tokens.
-
-Once an image has been built/pushed and complete main parameters are prepared:
-
-```powershell
-.\scripts\infra\Prepare-Azure.ps1 -Stage Application -ConfigFile .\infra\bootstrap.local.json `
-  -ParametersFile .\infra\parameters.local.json -BicepPath C:\tools\bicep.exe `
-  -ReportPath C:\reports\application-check.json -AuthProvider AzPowerShell -Check
-
-# Only after the above and the deployment/role/cost review:
-.\scripts\infra\Prepare-Azure.ps1 -Stage Application -ConfigFile .\infra\bootstrap.local.json `
-  -ParametersFile .\infra\parameters.local.json -BicepPath C:\tools\bicep.exe `
-  -ReportPath C:\reports\application-apply.json -AuthProvider AzPowerShell -Apply -CostApproved
-```
-
-Application preparation binds tenant/registry/resource group to the bootstrap
-configuration, checks registered providers and the exact existing image digest,
-then runs ARM validation and what-if. The Az.Accounts adapter uses resource-scoped
-ARM requests, bounded asynchronous polling, and transient in-memory ACR OAuth
-exchange for manifest read (no registry credentials saved). It does not register
-Entra applications, build/push an image, approve quota, or automatically consent.
-ARM polling accepts dictionary headers or the Az.Accounts enumerable key/value
-header shape. It requires exactly one Location value on the approved ARM host
-and subscription, preserves signed queries privately, and never prints the URL.
-Successful ARM what-if `properties.changes` is normalized into root `changes`
-containing only resource IDs/change types for the shared deployment script.
-Missing changes fail explicitly; a genuine empty changes array remains valid.
-The lower-level `Deploy.ps1` also supports `-AuthProvider AzPowerShell`.
-
-Reports have `schemaVersion: 1`, `mode`, `stage`, `target`,
-`selectedAuthProvider`, `overallStatus` (`PASS`, `FAIL`, `BLOCKED`), `execution`
-(`NotRequested`, `Blocked`, `Succeeded`, `Unknown`), `checks` containing only
-`id/category/status/code`, `identityAlternatives` and `plannedActions`.
-`liveApplicationVerified` is always **false**: stage-readiness or successful ARM
-deployment is not a browser/audio/data-plane test. Exit codes are **0** for a
-passed requested stage, **1** for failed configuration/operation, and **2** for
-blocked prerequisites. Input, identity, and cloud availability are separate
-categories. Reports contain no raw error bodies, parameter values, user account
-names, request URLs with tokens, or credentials.
+The online modes of `Deploy.ps1`, `Import-Knowledge.ps1` and `Update-SemanticIndex.ps1` read the subscription and
+tenant only from this file. A missing file, a placeholder or a different `-SubscriptionId`/`-TenantId` stops them
+before any Azure request; errors name the field, never its value. `VOICE_ASSISTANT_RELEASE_CONFIG` selects another
+path. Offline modes (the default) do not need the file.
 
 ### Main application prerequisites
 
-1. Sign in separately with Azure CLI. The target subscription and tenant are the
-   `subscriptionId` and `tenantId` in your git-ignored `infra/release.local.json`.
-   Scripts pass `--subscription`
-   explicitly, check enabled state/tenant, and never call `az account set` or
-   change workstation defaults. Alternatively use the verified existing
-   Az.Accounts path above; no new login is needed if that identity is usable.
-   Resource group/registry creation is optional explicit bootstrap Apply only;
-   provider registration, role application or upload is never implicit.
-2. Create/approve two single-tenant Entra registrations: API and public SPA.
-   The API must issue **v2 access tokens** and expose delegated `Meeting.Access`.
-   Grant the SPA that API delegated permission and complete the required consent.
-   Use authorization code + PKCE, **no client secret**, with the SPA redirect URI
-   equal to the final browser HTTPS origin (`location.origin`). Do not enable
-   implicit flow as a workaround. Entra registration/consent is outside this IaC.
-   The Windows in-person client requires a **separate native public-client
-   registration**: single-tenant, `http://localhost` in its public-client redirect
-   list, the same delegated `Meeting.Access` permission, and approved consent or
-   API preauthorization. Do not substitute the SPA client ID or configure a
-   client secret. Validate existing registrations without modifying them:
-
-   ```powershell
-   .\scripts\infra\Test-NativeEntra.ps1 -TenantId <tenant-guid> `
-     -ApiClientId <api-client-guid> -NativeClientId <native-client-guid>
-   ```
-
-   This registration check does not demonstrate a user's interactive login.
-   The native client must obtain its own token, request the same API session
-   ticket as the browser, and supply the configured allowed HTTPS Origin.
-3. Build the integrated repository's API Dockerfile from repository root and push
-   to the approved existing ACR using your approved image-publishing procedure:
+1. Sign in with Azure CLI. The scripts pass `--subscription` explicitly and never run `az account set`. To use an
+   existing Az PowerShell (Az.Accounts) sign-in instead, add `-AuthProvider AzPowerShell` to `Deploy.ps1`,
+   `Import-Knowledge.ps1` or `Update-SemanticIndex.ps1`.
+2. Create two single-tenant Entra app registrations: an API and a public SPA. The API issues **v2 access tokens** and
+   exposes the delegated scope `Meeting.Access`; grant the SPA that permission and complete consent. The SPA uses
+   authorization code with PKCE, no client secret and no implicit flow. Its redirect URI is the browser HTTPS origin.
+3. Build the API image from the repository root and push it to the ACR:
    `docker build -f .\src\VoiceAssistant.Api\Dockerfile -t <registry>.azurecr.io/voice-assistant:<version> .`
-   That Dockerfile builds `src/VoiceAssistant.Web`, publishes .NET 10 and copies
-   the frontend to `wwwroot`. Resolve the pushed image digest and supply
-   `<registry>.azurecr.io/voice-assistant@sha256:<64-hex-digest>`.
-   Build/push tools are operator prerequisites, **not end-user installations**.
-4. Acquire an official [Bicep CLI release](https://github.com/Azure/bicep/releases),
-   verify its release-asset SHA256, and keep it in an isolated tools directory.
-   Windows PowerShell 5.1 is sufficient for these scripts. If local execution
-   policy requires it, use a process-only invocation such as
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`; do not change
-   machine/user policy. No PowerShell modules or npm dependencies are required.
-5. Copy `parameters.example.json` to `parameters.local.json` (ignored by Git).
-   Replace every `REPLACE_` value. Choose actual available chat model/version,
-   deployment SKU/capacity and service regions after checking subscription
-   quota, policy, residency, retirement and regional availability. The backend
-   requires streaming chat supporting temperature and output-token limits.
-   Embeddings are currently **text-embedding-3-small with 1536 dimensions**;
-   model version/SKU/capacity remain explicit inputs. Changing dimension/model
-   compatibility requires a coordinated backend + index migration.
+   The Dockerfile also builds the web client into `wwwroot`. Pass the image to the template by digest (`@sha256:`).
+   For later releases, `scripts/release/Release.ps1` builds in ACR, checks staging and promotes the same digest
+   ([release script](../scripts/release/README.md), [runbook](../docs/runbooks/release-and-rollback.md)).
+4. Download an official [Bicep CLI release](https://github.com/Azure/bicep/releases) and verify its SHA256 (CI pins
+   the version and checksum in `.github/workflows/ci.yml`). The scripts run on PowerShell 7 or Windows PowerShell 5.1.
+5. Copy `parameters.example.json` to `parameters.local.json` (ignored by Git) and replace every `REPLACE_` value.
+   Check quota, policy, data residency and regional availability before you choose models, SKUs and regions. The
+   embedding model is text-embedding-3-small with 1536 dimensions; another dimension needs an index migration.
 
-`tenantId`, `apiAudience`, `spaClientId`, and `apiScope` are secure ARM parameters.
-They are public identity metadata, **not secrets**: API audience is the API
-application/client GUID in a v2 token's `aud`; SPA client GUID is different;
-scope is the complete exposed `api://.../Meeting.Access` URI.
-`GET /api/client-config` returns `{clientId, authority, scope, mode, login, webSocketPath}`
-with a full tenant authority; `login` is `demo` when the optional demo login below is
-enabled (outside Fake mode), otherwise `entra`. No Azure keys, connection strings or bearer tokens are exposed.
-`AZURE_CLIENT_ID` selects the assigned runtime identity for `DefaultAzureCredential`.
-Speech region, custom endpoint and full `SpeechResourceId` are wired separately.
-
-From repository root, edit the paths/group before executing. Online modes read the
-subscription and tenant from `infra/release.local.json`; an explicit
-`-SubscriptionId` may only restate it:
+`tenantId`, `apiAudience` (the API client ID), `spaClientId` and `apiScope` (the full `api://.../Meeting.Access` URI)
+are secure ARM parameters but public identity metadata, not secrets. The browser reads them from
+`GET /api/client-config` ([websocket-v1](../contracts/websocket-v1.md)).
 
 ```powershell
-$bicep = 'C:\tools\bicep.exe'
-$parameters = '.\infra\parameters.local.json'
-$group = '<existing-resource-group>'
-
-# Offline compile + fail-fast parameter checks only (the default).
-.\scripts\infra\Deploy.ps1 -ParametersFile $parameters -BicepPath $bicep
-
-# Explicit online ARM checks, no deployment.
+$bicep = 'C:\tools\bicep.exe'; $parameters = '.\infra\parameters.local.json'; $group = '<existing-resource-group>'
+.\scripts\infra\Deploy.ps1 -ParametersFile $parameters -BicepPath $bicep     # offline checks (the default)
 .\scripts\infra\Deploy.ps1 -ParametersFile $parameters -BicepPath $bicep -ResourceGroup $group -Validate
 .\scripts\infra\Deploy.ps1 -ParametersFile $parameters -BicepPath $bicep -ResourceGroup $group -WhatIf
-
-# Only after approval of resource cost, role grants and the reviewed change.
+# Only after the cost, the role grants and the change are approved:
 .\scripts\infra\Deploy.ps1 -ParametersFile $parameters -BicepPath $bicep -ResourceGroup $group -Apply
 ```
 
-What-if output is deliberately limited to resource IDs/change types; full diffs
-can contain environment values. Apply repeats validation before deployment.
-ARM validation cannot prove quota, image pull, consent or data-plane connectivity.
-The deterministic default-domain browser origin is computed from app name and
-environment domain and configured as the backend's exact allowed origin; update
-Entra's SPA redirect after deployment. Custom domains are not configured.
+What-if prints only resource IDs and change types. `-Apply` repeats validation first. Validation cannot prove quota,
+image pull, consent or data-plane access. The template sets the default-domain browser origin as the API's only
+allowed origin; after deployment, add it as the SPA redirect URI. Custom domains are not configured.
 
 ### Optional demo login (`POST /api/demo/login`)
 
-For demos without Entra accounts, one shared username/password can issue bearer
-tokens for one fixed identity. Entra tokens stay accepted. `main.bicep` does not set
-these values; configure them on the Container App, with the password and signing key
-as Container Apps secrets (`secretref:`), never in Git:
+For demos without Entra accounts, one shared username and password can issue bearer tokens for one fixed identity.
+Entra tokens stay accepted. `main.bicep` does not set these values. Configure them on the Container App, with the
+password and signing key as Container Apps secrets (`secretref:`), never in Git:
 
 | Setting | Meaning |
 | --- | --- |
@@ -319,295 +105,123 @@ as Container Apps secrets (`secretref:`), never in Git:
 | `DemoLogin__Password` | Shared password (secret) |
 | `DemoLogin__ObjectId` | GUID used as the token's `oid`; uploaded materials belong to it |
 | `DemoLogin__SigningKey` | Base64 HMAC key of at least 32 bytes (secret) |
-| `DemoLogin__TokenDays` | Token lifetime in days: default **7**, allowed 1-30; any other value prevents startup |
+| `DemoLogin__TokenDays` | Token lifetime in days: default 7, allowed 1 to 30; any other value prevents startup |
 
-`POST /api/demo/login` takes `{"username":"...","password":"..."}` and returns
-`{token, username, expiresAt}`. Outside Fake mode the request must carry an `Origin`
-header equal to the app's browser origin (scripts must send it too). It answers 400
-for a malformed body, 401 for wrong credentials, 403 for a missing or other Origin,
-413 for a body over 1 KB and 429 (with `Retry-After: 600`) after 10 failed attempts
-from one client address in 10 minutes.
-The token is an HS256 JWT (issuer/audience `voice-assistant-demo`, scope
-`Meeting.Access`). It cannot be revoked: rotate `DemoLogin__SigningKey` to invalidate
-all issued tokens. Anyone with the password acts as that one identity and sees its
-materials, so use a dedicated synthetic identity, never a real person's object ID.
-A template deployment (`Deploy.ps1 -Apply`) replaces the container environment
-list, so re-apply these settings afterwards. The evaluation harness can sign in
-through this endpoint (see [quality baseline](../docs/runbooks/quality-baseline.md)).
+The endpoint takes `{"username":"...","password":"..."}` and returns `{token, username, expiresAt}`. Outside Fake
+mode the request needs an `Origin` header equal to the app's origin; scripts must send it too. Errors: 400 malformed
+body, 401 wrong credentials, 403 missing or other `Origin`, 413 body over 1 KB, and 429 with `Retry-After: 600` after
+10 failures from one address in 10 minutes. The token is an HS256 JWT (issuer and audience `voice-assistant-demo`,
+scope `Meeting.Access`). It cannot be revoked; rotate the signing key to invalidate all tokens. Anyone with the
+password acts as that identity, so use a dedicated synthetic object ID. `Deploy.ps1 -Apply` replaces the container
+environment list, so set these values again afterwards. QualityEval signs in through this endpoint
+([quality baseline](../docs/runbooks/quality-baseline.md)).
 
 ### One replica is intentional, not high availability
 
-The API issues single-use, 30-second in-memory WebSocket tickets after bearer
-authentication. `minReplicas = maxReplicas = 1` and a single active revision are
-deliberate. **Rolling revisions can still overlap processes and lose ticket
-affinity**; replacement/restart also loses all tickets and active sessions.
-Drain users for updates and have clients obtain a new ticket/reconnect. Do not
-scale out or claim seamless rollouts until distributed one-use ticket storage or
-verified ticket-to-WebSocket affinity exists. Search also starts at one replica/
-partition; this baseline is not an HA/SLA design.
+The API keeps single-use, 30-second WebSocket tickets in memory, so the template sets `minReplicas = maxReplicas = 1`
+with one active revision. A restart or a new revision loses tickets and active sessions. Drain users before updates.
+Do not scale out until tickets move to shared storage. Search also starts with one replica and one partition.
 
-## Approved local text/markdown ingestion
+## Approved knowledge import (`Import-Knowledge.ps1`)
 
-The default is entirely offline: no token acquisition, HTTP, embeddings, index
-creation, uploads or deletion. Only explicitly listed UTF-8 `.txt`/`.md` files
-inside `ContentRoot` are accepted (1 MiB per file, 100 operations per manifest);
-traversal, symlinks, empty text and public/wildcard/empty ACLs fail.
-Actual local `-Apply` requires approved private connectivity/DNS to the Blob
-account. Do not re-enable public networking to make the local command work.
-The separate [one-shot synthetic job](private-ingestion/README.md) provides a
-bounded private route without adding Blob permissions to the web identity.
+The default run is offline: no token, request, embedding or upload. The manifest lists UTF-8 `.txt` and `.md` files
+inside `-ContentRoot` (at most 1 MiB per file, 100 operations per manifest). Path traversal, symbolic links, empty
+text and public, wildcard or empty ACLs fail. `-Apply` needs an approved private network path to the Blob account.
 
-Use `scripts\infra\tests\fixtures\manifest.json` as the shape reference, **not as
-production data**. Each upsert supplies `documentId`, `operation: "upsert"`,
-relative `path`, `title`, original HTTPS `url`, RFC3339 `updatedAt`, and
-`allowedPrincipalIds`. The operator must verify export approval, source URL and
-current document permissions in the named tenant. IDs must be **user object IDs**,
-not client IDs or group IDs: the current backend filters the caller's `oid`
-and does not resolve group membership. The tool cannot verify real document
-ownership/permissions from a local file and does not claim to sync them.
+`scripts\infra\tests\fixtures\manifest.json` shows the shape. Each upsert has `documentId`, `operation: "upsert"`, a
+relative `path`, `title`, the original HTTPS `url`, an RFC 3339 `updatedAt` and `allowedPrincipalIds`. The IDs must
+be **user object IDs**: the API filters on the caller's `oid` and does not resolve groups. The operator confirms
+export approval and current document permissions; the script cannot verify them.
 
 ```powershell
-.\scripts\infra\Import-Knowledge.ps1 -ManifestPath C:\approved\manifest.json -ContentRoot C:\approved
-
-# Only during an approved maintenance window with the app stopped/drained.
-# Subscription and tenant come from infra/release.local.json.
-.\scripts\infra\Import-Knowledge.ps1 -ManifestPath C:\approved\manifest.json -ContentRoot C:\approved `
-  -ResourceGroup '<existing-resource-group>' -SearchName '<deployed-search-name>' `
-  -OpenAIName '<deployed-openai-name>' -StorageAccountName '<deployed-storage-name>' `
-  -EmbeddingDeployment meeting-embedding -CreateIndex -ConfirmExclusiveMaintenance -Apply
+.\scripts\infra\Import-Knowledge.ps1 -ManifestPath <approved>\manifest.json -ContentRoot <approved>
+# Only in an approved maintenance window, with the app stopped or drained:
+.\scripts\infra\Import-Knowledge.ps1 -ManifestPath <approved>\manifest.json -ContentRoot <approved> `
+  -ResourceGroup <existing-resource-group> -SearchName <search-name> -OpenAIName <openai-name> `
+  -StorageAccountName <storage-name> -CreateIndex -ConfirmExclusiveMaintenance -Apply
 ```
 
-For an existing Az.Accounts identity, add `-AuthProvider AzPowerShell` to the
-explicit apply command. No CLI login or credential export is needed. Token
-acquisition has a bounded 90-second process deadline; existing ingestion lease
-safety checks still reject any data request whose lease safety window elapsed
-while authentication was pending.
+- `-CreateIndex` is for the first run only; it never replaces an existing index. An existing index must match
+  `infra/knowledge/index.json`, which adds `documentId` and `sourceHash` to the API fields.
+- Chunks are at most 1,500 UTF-16 code units with 150 overlap; the API's upload path uses its own chunker
+  ([knowledge-v1](../contracts/knowledge-v1.md)). The normalized text is stored in
+  `documents/<index>/<documentId>.txt`.
+- The script uses the operator's Entra tokens in memory and never prints keys, tokens or request bodies.
 
-`-CreateIndex` is for first creation only; it uses `If-None-Match: *` and never
-silently replaces an existing index. Omit it on subsequent runs. Existing indexes
-must match `infra/knowledge/index.json`: it preserves every backend field and
-adds filterable `documentId` and retrievable `sourceHash` for lifecycle management.
-An incompatible/legacy index requires a separately approved new index and app
-configuration migration, not an in-place destructive schema overwrite.
+The script owns the index exclusively. Before an update, especially a permission revocation, stop or drain the app:
+active sessions may hold retrieved evidence. `-ConfirmExclusiveMaintenance` is an acknowledgment; it stops nothing.
+For changed content, title, URL or ACL, increase `updatedAt`. Old chunks are removed before new ones are published.
+To delete a document, submit `{ "documentId": "<id>", "operation": "delete", "updatedAt": "<later time>" }`; leaving
+it out of a manifest does not delete it. A per-index Blob version ledger stops old manifests from restoring deleted
+sources; do not delete it. A 60-second Blob lease serializes writers. There is no cross-service transaction: after a
+failed run, keep the app stopped, retry the same manifest without `-CreateIndex`, and check ACL isolation with an
+authorized and an unauthorized test identity. Search writes are eventually consistent, so revocation is not instant.
 
-Chunks are deterministic, at most 1500 UTF-16 code units with 150 overlap (Unicode
-surrogate pairs are preserved). Each carries title, original URL, update time,
-explicit normalized ACL and a 1536-element embedding. The original normalized
-text is stored privately under `documents/<index>/<documentId>.txt`.
-All service access uses the signed-in operator's Entra tokens in memory; no
-keys/SAS, credential files or request/response bodies are printed.
+## Operations
 
-### Permission changes, deletion and recovery
+### Semantic ranking and existing-index migration
 
-Treat this index as owned exclusively by this ingestion tool. Stop/drain all app
-revisions and clear active sessions before any update, especially permission
-revocation: session context may already contain retrieved evidence. The
-`-ConfirmExclusiveMaintenance` switch is an **operator acknowledgment**, not an
-automatic stop or proof of an outage. No script changes app revisions.
+The API reranks hybrid results with the semantic configuration `meeting-semantic` and drops results below a minimum
+reranker score; ACL filtering always applies first. The threshold values are recorded only in the
+[quality baseline](../docs/runbooks/quality-baseline.md). The template also turns on the four
+[experiment switches](../src/VoiceAssistant.Api/README.md#experiment-switches) that are off in the API by default.
+`searchSemanticSearch` takes `free` or `standard` (default). When the free monthly quota runs out, every grounded
+reply fails with HTTP 402 ([runbook](../docs/runbooks/search-semantic-quota.md)). The API never falls back to raw
+vector results.
 
-For changed content, title, URL, **ACL**, or deletion, advance `updatedAt`
-strictly. Equal timestamps are accepted only for the exact same operation/hash.
-Old chunks are deleted and removal observed before replacement embeddings are
-published, so shortened files cannot leave orphaned chunks with obsolete ACLs.
-For removal, submit a manifest document containing only:
-
-```json
-{
-  "documentId": "approved-document",
-  "operation": "delete",
-  "updatedAt": "2026-09-19T10:00:00Z"
-}
-```
-
-Deletion removes all that document's vectors and source blob. Omitting a document
-from a manifest does **not** delete it. An index-specific Blob version/tombstone
-ledger prevents old manifests resurrecting deleted sources; do not delete that
-ledger to work around version conflicts. A renewable 60-second Blob lease
-serializes writers. Bounded HTTP requests and lease-deadline checks fail closed
-if authentication/requests outlive the lease safety window.
-
-There is no cross-service transaction: a failed run can leave missing/partial
-new chunks and a `pending` ledger record. Keep readers stopped; retry the exact
-approved manifest without `-CreateIndex`, resolve any reported error, and confirm
-Search visibility/ACL isolation with authorized and unauthorized test identities
-before restarting the app. Search writes and permission propagation are
-eventually consistent; do not promise immediate revocation from a successful
-upload response alone. Blob versioning/soft delete are disabled in this baseline
-to avoid hidden retained source versions; service-side deletion policies still
-apply. No source contents, transcripts, audio or generated answers are kept in
-the version ledger.
-
-## Content-safe operations, costs and readiness
-
-### Semantic relevance gate and existing-index migration
-
-Hybrid nearest-neighbor results alone are not proof that a document is relevant.
-The coordinated API uses semantic reranking with explicit
-`Azure__SearchSemanticConfiguration=meeting-semantic` and
-`Azure__SearchMinimumRerankerScore=1.5`; ACL prefiltering remains mandatory.
-The template sets 1.5 since the October 2026 synthetic evaluation (pass 0.98 and
-retrieval hit 0.99 against 0.88 and 0.84 at 2.0, see the
-[quality baseline](../docs/runbooks/quality-baseline.md)); the API's own default is 2.0.
-The template also sets `Session__EarlyStartAtFinal=true`, `Speech__MaterialPhraseHints=true`,
-`Session__SpeculativeStart=true` and `Session__QuietReplyMs=1500`; each passed a staging evaluation (see the experiment
-switches in the API README).
-The index's `meeting-semantic` configuration prioritizes `title` as title and
-`content` as content. The Bicep parameter `searchSemanticSearch` allows `free`
-or `standard`, default `standard`. The free plan has a monthly query quota; once it
-is exhausted every grounded reply fails (HTTP 402), so production uses `standard`,
-which charges per semantic request. Confirm regional/service support before deployment.
-Measure end-to-end latency and
-representative relevant/irrelevant queries against the live service. A reranker
-threshold is not a calibrated probability or a guarantee of relevance.
-Semantic service errors, quota exhaustion, partial responses or missing scores
-must remain explicit failures; do not silently fall back to raw vector top-K.
-
-For an already populated index, **do not delete the index, reindex documents,
-restart private ingestion, weaken ACLs or change Blob networking**. Enable the
-service capability through reviewed IaC, then add the semantic metadata with
-the migration command:
+To add the semantic configuration to a populated index, do not delete or reindex it. Enable the capability through
+the template, then run:
 
 ```powershell
-# Default is offline: review an approved index-metadata GET export including @odata.etag.
-.\scripts\infra\Update-SemanticIndex.ps1 -SchemaFile C:\approved-artifacts\search-index-metadata.json
-
-# Explicit, metadata-only apply against the owned Search service.
-# Subscription and tenant come from infra/release.local.json.
-.\scripts\infra\Update-SemanticIndex.ps1 -Apply -AuthProvider AzPowerShell `
-  -ResourceGroup <existing-resource-group> -SearchName <deployed-search-name> `
-  -IndexName meeting-knowledge
+.\scripts\infra\Update-SemanticIndex.ps1 -SchemaFile <approved>\search-index-metadata.json   # offline review
+.\scripts\infra\Update-SemanticIndex.ps1 -Apply -ResourceGroup <existing-resource-group> -SearchName <search-name>
 ```
 
-Apply ignores any offline snapshot and reads fresh metadata, checks existing
-fields/ACL/vector compatibility, adds only the missing named configuration,
-and sends the complete preserved definition with **If-Match: exact ETag**.
-Existing analyzers, scoring profiles, CORS, vector settings, other semantic
-configurations and their default configuration are retained. If no semantic
-default exists, `meeting-semantic` is selected; the API explicitly names it
-regardless. A conflicting same-name configuration is rejected for review rather
-than overwritten. Already-correct metadata is a no-op.
+`-Apply` reads fresh metadata (index `meeting-knowledge` by default), checks compatibility and adds only the missing
+configuration with `If-Match` on the exact ETag, so other settings stay unchanged. A same-name conflict is rejected;
+correct metadata is a no-op; HTTP 412 is not retried. A final GET must confirm the result. The script never reads or
+writes index documents. The operator needs Search Service Contributor. Rebuild the private-ingestion image before its
+next run.
 
-HTTP 412 rejects a concurrent edit without retry; errors, missing capability,
-unavailable service or post-update drift are explicit blockers. A verification
-GET checks the semantic contract and preservation of existing settings before
-reporting success. Only index GET/conditional PUT/GET requests are used, never
-document queries/uploads/deletes, embedding generation or private Blob access.
-The operator needs Search Service Contributor plus the existing metadata-read
-and token permissions; this migration grants no roles. Metadata/token responses
-are not printed. Rebuild a future private-ingestion image to carry the updated
-strict schema before its next separately approved run; no current data changes
-are necessary.
+### Diagnostics, health and cost
 
-Search can complete an existing-index PUT with **204 No Content**. That response
-is accepted without parsing a body, but is never the final proof of success:
-the subsequent GET must return HTTP 200 JSON and pass preservation checks.
-PUT 200/201 metadata responses remain supported; GET 204 or an empty/malformed
-GET response fails. If an older client reported an unexpected PUT response,
-inspect fresh metadata before retrying; an already-correct configuration is a
-read-only no-op rather than a repeated write.
-Capability checks recognize Azure CLI's top-level `semanticSearch` and the
-Az.Accounts ARM response's `properties.semanticSearch`. Conflicting dual shapes,
-missing metadata, disabled or unrecognized states fail before any index request.
+- **Logs and metrics.** With `enableDiagnostics=true`, console and system logs go to a 30-day, Entra-only Log
+  Analytics workspace (`${namePrefix}-logs`). Application Insights (`${namePrefix}-insights`) receives only the
+  API's content-free metrics through the runtime identity's Monitoring Metrics Publisher role: no request traces, no
+  logs and no Statsbeat. Instrument names:
+  [content-free timing metrics](../src/VoiceAssistant.Api/README.md#content-free-timing-metrics).
+- **No content in logs.** The API logs no transcript, answer, query or request URL. Do not enable URL logging at
+  ingress or proxies: WebSocket upgrade URLs carry one-use tickets.
+- **Alert.** The alert fires on `Replicas < 1`. Set `alertActionGroupId` to route notifications.
+- **Health.** Startup and liveness use `/health/live`; readiness uses `/health/ready`, so a revision gets traffic only
+  when ready. Warm-up stages are in the [API README](../src/VoiceAssistant.Api/README.md). Warm-up makes no billable
+  call, so verify RBAC and data-plane access separately with synthetic data.
+- **Cost.** Drivers are the always-on app (2 vCPU and 4 GiB by default, `containerCpu`), Search capacity, Speech
+  time, tokens, embeddings, storage and the registry. Set budget alerts before `-Apply`; **a budget alert is not a
+  spending cap.**
 
-`Test-SemanticIndex.ps1` covers preservation, idempotency, exact ETags/conflicts,
-semantic field mismatches and offline defaults. `Test-Offline.ps1` invokes it
-and requires semantic parity with the coordinated `contracts/search-index.json`
-when `-BackendSchemaPath` is supplied. An old API contract intentionally fails
-that release check until the matching API change is integrated.
+### Workbook
 
-With `enableDiagnostics=true` (the default) the container environment sends
-**console and system logs only** to a dedicated 30-day, Entra-only Log Analytics
-workspace (`${namePrefix}-logs`), and an Entra-only Application Insights resource
-(`${namePrefix}-insights`) receives content-free metrics through the runtime identity's
-Monitoring Metrics Publisher role. The template sets `APPLICATIONINSIGHTS_CONNECTION_STRING`
-(empty when `enableDiagnostics=false`, which turns export off) and `OTEL_SERVICE_NAME`
-(the app name, `${namePrefix}-web`, shown as the Application Insights cloud role).
-Export is **metrics-only**: the API's own content-free `VoiceAssistant.Api` meter
-(per-stage reply timings, retrieval and warm-up failures, sessions), authorized with Entra
-through the runtime identity, with no request tracing, no log export and no offline retry
-storage. Statsbeat, the exporter's own usage telemetry, is switched off
-(`APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true` unless set explicitly). Instrument names:
-[content-free timing metrics](../src/VoiceAssistant.Api/README.md#content-free-timing-metrics).
-There is no request/body capture and no request
-diagnostic category. The API logs no transcript, answer, query text or request URL:
-ASP.NET request logs stay at `Warning`. Do not later enable full URL/query logging at
-ingress, proxies or telemetry: WebSocket upgrade URLs carry one-use tickets (single use,
-valid for under a minute). Set `enableDiagnostics=false` to compile without any log
-destination (an empty `appLogsConfiguration`; the ARM API rejects the literal `"none"`).
-The metric alert checks
-`Replicas < 1`; an optional pre-existing `alertActionGroupId` routes notifications,
-otherwise alerts are portal-only. Missing metric series are not a reliable
-outage signal.
+With `enableDiagnostics=true` and `deployWorkbook=true` (both default), the template also deploys the Azure Monitor
+workbook "Live Coach telemetry". It charts reply latency, reply outcomes and decisions, token use and reliability
+counters from the content-free metrics, plus per-reply first-line percentiles from the `ReplySummary` console lines.
+To add it to an existing deployment without touching the Container App, deploy `workbook.bicep` alone:
 
-The container probes use `/health/live` for startup and liveness and `/health/ready`
-for readiness, so a new revision takes traffic only once it is ready. In Azure mode
-`/health/ready` answers 503 (`warming`) until a startup warm-up has succeeded **once**:
-the Cognitive Services token that Speech and Azure OpenAI share (through the runtime
-identity), then a TLS connection to Azure OpenAI and a Speech reachability check, each
-bounded to 10 s and retried with backoff. After 60 s of failures it reports `not_ready`
-and logs one content-free error line. The Search warm-up is **best-effort**: it retries in
-the background and never delays readiness. Once ready, a replica stays ready for the life
-of the process; Fake mode is ready at once. No warm-up request is a billable model, speech
-or ranking call, and any HTTP answer (including 401/403) counts as reached, so verify RBAC
-and data-plane access separately with approved synthetic data. Details:
-[API health endpoints](../src/VoiceAssistant.Api/README.md). Provider
-content-processing/abuse-monitoring policies still apply; this template does not
-override service retention policy or disable model content filtering.
+```powershell
+az deployment group create --resource-group <group> --template-file .\infra\workbook.bicep `
+  --parameters appInsightsId=<application-insights-id> logAnalyticsWorkspaceId=<log-analytics-workspace-id>
+```
 
-Cost drivers are the always-on Container App (2 vCPU/4 GiB by default, `containerCpu`), Search
-replicas/partitions, Speech audio duration, chat input/output tokens, ingestion/
-retrieval embeddings, Blob capacity/operations, the existing registry and Azure
-Monitor alert evaluations/notifications. Region, model SKU and quota allocation
-change prices; no cost estimate or availability guarantee is embedded. Configure
-approved subscription/resource-group **budget alerts** and owner notifications
-before apply. **A budget alert is not a spending cap and does not stop services.**
-Apply, reindexing and live tests can incur charges; deployments are not free
-because a script's default is dry-run.
+Histogram tiles show count-weighted percentiles of per-minute means, because the exporter sends no buckets; the log
+tiles give exact per-reply percentiles.
 
-Local evidence: Bicep **v0.47.16**, official `bicep-win-x64.exe` SHA256
-`3f343ab1ce41feac156464adee3dc499cb6c197366fc731aed276192011d867c`,
-compiles without diagnostics. The infrastructure/ingestion, readiness/bootstrap/
-adapter, private-ingestion and semantic-metadata checks run on Windows PowerShell
-5.1 and PowerShell 7, including the integrated backend Search contract. CI runs them
-as the `infrastructure-offline-tests` stage of `scripts/verify-release.ps1`; the
-current counts are in each run's log and its `verification-evidence` artifact.
+## Offline tests
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\infra\tests\Test-Offline.ps1 `
   -BicepPath C:\tools\bicep.exe -BackendSchemaPath .\contracts\search-index.json
 ```
 
-`Test-Offline.ps1` invokes `Test-Readiness.ps1` automatically; the latter can also
-run independently. Its authentication/resource requests use isolated fixtures,
-including a synthetic Az.Accounts module; it never provisions cloud resources.
-The test suite requires no Azure account or real uploads. It checks compiled
-security/hosting settings, parameter rejection, mocked validation/what-if/apply
-subscription gates (including the fail-closed local release target), offline
-defaults, ACLs, chunking, Unicode, index/vector
-compatibility, mocked embeddings/uploads, stale versions, deletions, lease
-exclusion and partial-failure recovery. Omitting `BackendSchemaPath` skips the
-one cross-component schema comparison. The tests point `VOICE_ASSISTANT_RELEASE_CONFIG`
-at the synthetic `scripts/infra/tests/fixtures/release.fixture.json`.
-
-**Follow-up read-only Azure evidence:** an existing Az.Accounts identity acquired
-an ARM token and read the approved enabled subscription/tenant successfully.
-The new adapter's `account show` and dedicated group-existence requests were
-also verified read-only. This proves only ARM access, not deployment privileges,
-data-plane access, quota or application readiness.
-The corrected adapter also completed actual ARM what-if through `Deploy.ps1`,
-emitting only resource IDs/change types; nested ARM response handling and signed
-polling headers were verified without applying resources.
-
-**Not yet verified by this slice in Azure:** deployment policy/provider checks,
-live ARM validation, regional model capacity/quota, container build/push/
-pull, RBAC propagation, Entra registration/consent/redirect, live Speech and model
-calls, real index ingestion and ACL isolation, and browser microphone/tab-audio
-capture over the deployed HTTPS origin. No resources, roles or documents were
-applied during this slice. Compilation and mocked tests are preparation evidence,
-not an Azure deployment or an end-to-end production-readiness claim.
-
-References: [Container Apps Bicep schema](https://learn.microsoft.com/azure/templates/microsoft.app/2024-03-01/containerapps),
-[model deployment schema](https://learn.microsoft.com/azure/templates/microsoft.cognitiveservices/2024-10-01/accounts/deployments),
-[Speech Entra authentication](https://learn.microsoft.com/azure/ai-services/speech-service/how-to-configure-azure-ad-auth),
-[AI RBAC roles](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/ai-machine-learning),
-[Container Apps metrics](https://learn.microsoft.com/azure/azure-monitor/reference/supported-metrics/microsoft-app-containerapps-metrics).
+The tests need no Azure account. They check the compiled template, the subscription lock, ACLs, chunking, mocked
+uploads, deletions, leases and recovery, plus the Azure process adapter, private ingestion and semantic index.
+`-BackendSchemaPath` compares the index with the API's schema. CI runs them through `scripts/verify-release.ps1`.
