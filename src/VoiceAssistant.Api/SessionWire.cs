@@ -46,7 +46,7 @@ internal sealed class SessionWire(WebSocket socket, ILogger logger)
                     if (DateTime.UtcNow - window > TimeSpan.FromSeconds(1)) { window = DateTime.UtcNow; commands = 0; }
                     if (++commands > 10) throw new ProviderException("command_limit", "Too many commands.");
                     var command = ParseCommand(message.Bytes);
-                    await events.WriteAsync(new(command.Kind, command.Update), cancellation);
+                    await events.WriteAsync(new(command.Kind, command.Value), cancellation);
                     if (command.Kind == SessionEventKind.SessionStop) return;
                 }
             }
@@ -81,21 +81,60 @@ internal sealed class SessionWire(WebSocket socket, ILogger logger)
         try
         {
             using var json = JsonDocument.Parse(bytes);
-            var kind = json.RootElement.GetProperty("type").GetString() switch
+            var root = json.RootElement;
+            var kind = root.GetProperty("type").GetString() switch
             {
                 "response.request" => SessionEventKind.ResponseRequest,
                 "response.cancel" => SessionEventKind.ResponseCancel,
                 "session.stop" => SessionEventKind.SessionStop,
                 "session.update" => SessionEventKind.SessionUpdate,
+                "response.feedback" => SessionEventKind.ResponseFeedback,
+                "response.viewed" => SessionEventKind.ResponseViewed,
                 _ => throw new ProviderException("invalid_command", "Unsupported command.")
             };
-            return kind == SessionEventKind.SessionUpdate
-                ? new(kind, SessionOptions.ParseUpdate(json.RootElement.GetProperty("options")))
-                : new(kind);
+            return kind switch
+            {
+                SessionEventKind.SessionUpdate => new(kind, SessionOptions.ParseUpdate(root.GetProperty("options"))),
+                SessionEventKind.ResponseFeedback => new(kind, ParseFeedback(root)),
+                SessionEventKind.ResponseViewed => new(kind, ParseViewed(root)),
+                _ => new(kind)
+            };
         }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
         { throw new ProviderException("invalid_command", "Command must be a JSON object with a supported type and valid options."); }
     }
+
+    /// <summary>The reasons a <c>response.feedback</c> may give.</summary>
+    internal static readonly string[] FeedbackReasons = ["good", "late", "wrong", "thin", "hard_to_read", "unnecessary", "missing"];
+
+    /// <summary>The largest <c>visibleMs</c> a <c>response.viewed</c> item may report: one hour.</summary>
+    internal const int MaxVisibleMs = 3_600_000;
+
+    /// <summary>A <c>response.feedback</c> with a responseId and a known reason; null when it is malformed.</summary>
+    private static ReplyFeedback? ParseFeedback(JsonElement root) =>
+        ResponseIdOf(root) is { } responseId && root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String &&
+        reason.GetString() is { } value && FeedbackReasons.Contains(value) ? new(responseId, value) : null;
+
+    /// <summary>The 1 to 20 items of a <c>response.viewed</c>, each a responseId and whole milliseconds; null when malformed.</summary>
+    private static ReplyViewed[]? ParseViewed(JsonElement root)
+    {
+        if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array ||
+            items.GetArrayLength() is < 1 or > RecentResponses.Capacity) return null;
+        var viewed = new ReplyViewed[items.GetArrayLength()];
+        var index = 0;
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object || ResponseIdOf(item) is not { } responseId ||
+                !item.TryGetProperty("visibleMs", out var shown) || shown.ValueKind != JsonValueKind.Number ||
+                !shown.TryGetInt32(out var visibleMs) || visibleMs is < 0 or > MaxVisibleMs) return null;
+            viewed[index++] = new(responseId, visibleMs);
+        }
+        return viewed;
+    }
+
+    private static string? ResponseIdOf(JsonElement value) =>
+        value.TryGetProperty("responseId", out var id) && id.ValueKind == JsonValueKind.String && id.GetString() is { Length: > 0 } responseId
+            ? responseId : null;
 
     public async Task<WireMessage?> ReceiveAsync(CancellationToken cancellation, int textLimit = 4096)
     {

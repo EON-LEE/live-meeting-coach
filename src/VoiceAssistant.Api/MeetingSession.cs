@@ -58,6 +58,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private bool retrievalPrefetched;
     private readonly List<Task> retired = [];
     private KoreanScope? koreanScope;
+    /// <summary>The replies this session started lately; feedback and visibility reports count only for them.</summary>
+    private readonly RecentResponses issuedResponses = new();
     /// <summary>The protocol socket; stateless, so creating it on first use from any thread is safe.</summary>
     private SessionWire Wire => field ??= new(socket, logger);
     /// <summary>Generates this session's replies; created on first use from the session's provider, user and clock.</summary>
@@ -110,7 +112,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             // The client learns which optional features this socket has: pushed Korean lines, and settings changes while running.
             var ready = new Dictionary<string, object> { ["type"] = "session.ready", ["protocolVersion"] = 1 };
             if (options.ReplyKorean) ready["replyKorean"] = true;
-            if (!options.TranscribeOnly) ready["sessionUpdate"] = true;
+            if (!options.TranscribeOnly)
+            {
+                ready["sessionUpdate"] = true;
+                // The client may report its verdict on a reply and how long replies stayed visible.
+                ready["feedback"] = true;
+                ready["viewed"] = true;
+            }
             if (resumedTurns > 0) ready["resumedTurns"] = resumedTurns;
             await Wire.SendAsync(ready, lifetime.Token);
             // Cancelling a pending ReceiveAsync aborts the socket; retain it until the fatal time-limit event is sent.
@@ -277,6 +285,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         DiscardSpeculation("cancelled");
                         await CancelResponseAsync(lifetime.Token);
                         return;
+                    case SessionEventKind.ResponseFeedback or SessionEventKind.ResponseViewed:
+                        await NoteReplyReportAsync(message, lifetime.Token);
+                        break;
                     case SessionEventKind.Closed:
                         endReason = "client_closed";
                         return;
@@ -839,6 +850,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         if (retired.Count > 8) throw new ProviderException("response_overload", "Too many pending responses. Reconnect.");
         earlyReply = (number, segments);
         foreach (var held in adopted.Output.Adopt(number)) await HandleReplyEventAsync(held, lifetime);
+        issuedResponses.Add(adopted.ResponseId);
     }
 
     /// <summary>Drops the speculative reply, if any: its generation is cancelled, and nothing it produced is sent, logged or measured.</summary>
@@ -984,6 +996,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var route = responseRoute;
         var replies = Replies;
         generationTask = Task.Run(() => replies.GenerateAsync(output, history, route, prefetched, scope, settings, measurement, deadline, token, lifetime));
+        issuedResponses.Add(responseId);
     }
 
     /// <summary>
@@ -991,6 +1004,40 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     /// <c>response.started</c>. Its <c>turnId</c> names only the latest of them, so a client needs this to see all the gathered speech.
     /// </summary>
     private static int Segments(ConversationTurn[] history) => Math.Max(1, history.Count(turn => turn.CurrentResponseTarget));
+
+    /// <summary>
+    /// A client's report on replies it showed: a 1-tap verdict (<c>response.feedback</c>) or how long replies stayed visible
+    /// (<c>response.viewed</c>). Counted without content and never acknowledged; a report on a reply this session did not
+    /// start lately is ignored, and a malformed one is a non-fatal error.
+    /// </summary>
+    private async Task NoteReplyReportAsync(SessionEvent message, CancellationToken lifetime)
+    {
+        if (options.TranscribeOnly)
+        {
+            await Wire.ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime);
+            return;
+        }
+        switch (message.Value)
+        {
+            case ReplyFeedback feedback:
+                if (!issuedResponses.Contains(feedback.ResponseId)) return;
+                MeetingMetrics.ReplyFeedback(feedback.Reason);
+                logger.LogInformation("ReplyFeedback reason={Reason}", feedback.Reason);
+                return;
+            case ReplyViewed[] items:
+                foreach (var item in items)
+                    if (issuedResponses.Contains(item.ResponseId)) MeetingMetrics.ReplyVisible(item.VisibleMs);
+                return;
+            case null when message.Kind == SessionEventKind.ResponseFeedback:
+                await Wire.ErrorAsync("invalid_feedback",
+                    "Feedback needs a responseId and a reason: good, late, wrong, thin, hard_to_read, unnecessary or missing.", false, lifetime);
+                return;
+            default:
+                await Wire.ErrorAsync("invalid_viewed",
+                    "Viewed needs 1 to 20 items, each with a responseId and whole visibleMs from 0 to 3600000.", false, lifetime);
+                return;
+        }
+    }
 
     private async Task CancelResponseAsync(CancellationToken cancellation)
     {

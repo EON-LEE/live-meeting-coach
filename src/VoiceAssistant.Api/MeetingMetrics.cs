@@ -58,6 +58,10 @@ public static class MeetingMetrics
         "Live chat tokens by call type (answer, classifier, translation) and type (input, cached, output, reasoning).");
     private static readonly Counter<long> Decisions = Count("voiceassistant.reply.decision", "{reply}",
         "Replies whose primary line ended with the turn classifier's verdict known (respond, listen) or not yet known (unknown).");
+    private static readonly Counter<long> Feedback = Count("voiceassistant.reply.feedback", "{report}",
+        "1-tap verdicts the client reported on replies it showed, by reason.");
+    private static readonly Histogram<double> Visible = Milliseconds("voiceassistant.reply.visible",
+        "How long the client reported a reply stayed visible.");
     private static readonly Histogram<double> RecognitionLag = Milliseconds("voiceassistant.speech.recognition_lag",
         "Audio pushed to the recognizer minus the end of the recognized audio, when a partial or final arrives.");
     static MeetingMetrics() => Meter.CreateObservableGauge(
@@ -117,6 +121,10 @@ public static class MeetingMetrics
     public static void ChatThrottledResponse(string operation) => ChatThrottled.Add(1, new KeyValuePair<string, object?>("operation", Bounded(operation)));
 
     public static void ChatRetried(string operation) => ChatRetries.Add(1, new KeyValuePair<string, object?>("operation", Bounded(operation)));
+
+    public static void ReplyFeedback(string reason) => Feedback.Add(1, new KeyValuePair<string, object?>("reason", Bounded(reason)));
+
+    public static void ReplyVisible(int milliseconds) => Visible.Record(milliseconds);
 
     /// <summary>
     /// The token usage of one live chat call. Cached tokens are part of the input tokens and reasoning tokens part of the output

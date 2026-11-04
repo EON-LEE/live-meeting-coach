@@ -43,7 +43,7 @@ internal sealed class SpeechAttempt(bool delivered = false)
 internal enum SessionEventKind
 {
     Audio, Transcript, Speculate, Settle, Quiet, Closed, Fatal, SpeechRestarted,
-    ResponseRequest, ResponseCancel, SessionUpdate, SessionStop,
+    ResponseRequest, ResponseCancel, SessionUpdate, SessionStop, ResponseFeedback, ResponseViewed,
     Korean, Delta, Complete, GroundingUnavailable, GroundingFallback, GenerationError
 }
 
@@ -203,4 +203,33 @@ internal sealed class TeardownStep
         Interlocked.Read(ref finished) is var end and not 0 ? end : System.Diagnostics.Stopwatch.GetTimestamp()).TotalMilliseconds;
 }
 
-internal sealed record Command(SessionEventKind Kind, SessionUpdate? Update = null);
+/// <summary>
+/// A client command. Its value is the parsed <see cref="SessionUpdate"/>, <see cref="ReplyFeedback"/> or
+/// <see cref="ReplyViewed"/> items; null for a feedback or viewed report that was malformed (a non-fatal error).
+/// </summary>
+internal sealed record Command(SessionEventKind Kind, object? Value = null);
+
+/// <summary>The client's 1-tap verdict on one reply it was shown (<c>response.feedback</c>).</summary>
+internal sealed record ReplyFeedback(string ResponseId, string Reason);
+
+/// <summary>How long the client showed one reply (<c>response.viewed</c>).</summary>
+internal sealed record ReplyViewed(string ResponseId, int VisibleMs);
+
+/// <summary>
+/// The ids of the last <see cref="Capacity"/> replies a session started (sent with <c>response.started</c>); feedback and
+/// visibility reports count only for those. Used by the event loop alone.
+/// </summary>
+internal sealed class RecentResponses
+{
+    internal const int Capacity = 20;
+    private readonly string?[] ids = new string?[Capacity];
+    private int next;
+
+    public void Add(string responseId)
+    {
+        ids[next] = responseId;
+        next = (next + 1) % Capacity;
+    }
+
+    public bool Contains(string responseId) => Array.IndexOf(ids, responseId) >= 0;
+}
