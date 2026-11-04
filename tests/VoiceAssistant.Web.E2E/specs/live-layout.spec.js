@@ -63,7 +63,7 @@ async function fixture(page, native, expanded = true, settings = everything) {
   }, { english, korean, token, expanded });
 }
 
-async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, feedback = false, settings = everything } = {}) {
+async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, feedback = false, viewed = false, settings = everything } = {}) {
   const commands = [];
   const translations = [];
   await page.route('**/api/client-config', route => route.fulfill({
@@ -96,7 +96,8 @@ async function meetingFixture(page, { replyKorean = false, sessionUpdate = false
         effective = { responseMode: command.options.responseMode, replyKorean: command.options.replyKorean === true,
           replyOn: command.options.replyOn ?? 'all', notes: command.options.notes ?? '' };
         ws.send(JSON.stringify({ type: 'session.ready', ...(replyKorean ? { protocolVersion: 1, replyKorean: true } : {}),
-          ...(sessionUpdate ? { sessionUpdate: true } : {}), ...(feedback ? { feedback: true } : {}) }));
+          ...(sessionUpdate ? { sessionUpdate: true } : {}), ...(feedback ? { feedback: true } : {}),
+          ...(viewed ? { viewed: true } : {}) }));
       }
       if (command.type === 'session.update' && sessionUpdate) {
         effective = { ...effective, ...command.options };
@@ -327,6 +328,54 @@ test('a server that does not announce feedback never gets the row or the command
   reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
   await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
   await expect(page.locator('#feedback')).toBeHidden();
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(page.locator('#capture-status')).toContainText('꺼짐');
+  expect(ws.commands.map(command => command.type).filter(type => /^response\.(feedback|viewed)$/.test(type))).toEqual([]);
+  expect(ws.commands.at(-1).type).toBe('session.stop');
+});
+
+test('on-screen times go only to a server that asked: ids and whole milliseconds, while visible, sent before the stop', async ({ page }) => {
+  const ws = await meetingFixture(page, { viewed: true });
+  const viewed = () => ws.commands.filter(command => command.type === 'response.viewed');
+  const totals = () => viewed().flatMap(command => command.items)
+    .reduce((sum, item) => ({ ...sum, [item.responseId]: (sum[item.responseId] ?? 0) + item.visibleMs }), {});
+  const visibility = state => page.evaluate(hidden => {
+    if (hidden) Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    else delete document.visibilityState;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state === 'hidden');
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await page.waitForTimeout(300);
+  reply(ws, 2, 'And the risks?', 'The main risk is the data migration.');
+  await expect(page.locator('#answer-text')).toHaveText('The main risk is the data migration.');
+  await page.waitForTimeout(300);
+  // Hidden: everything seen so far goes out at once, then nothing counts until the panel shows again.
+  await visibility('hidden');
+  await expect.poll(() => Object.keys(totals()).sort()).toEqual(['r1', 'r2']);
+  const hidden = totals(), sent = viewed().length;
+  expect(hidden.r1).toBeGreaterThanOrEqual(250);
+  expect(hidden.r2).toBeGreaterThanOrEqual(250);
+  for (const command of viewed()) {
+    expect(Object.keys(command).sort()).toEqual(['items', 'type']);
+    for (const item of command.items) {
+      expect(Object.keys(item).sort()).toEqual(['responseId', 'visibleMs']);
+      expect(Number.isInteger(item.visibleMs)).toBe(true);
+    }
+  }
+  await page.waitForTimeout(400);
+  expect(viewed()).toHaveLength(sent);
+  await visibility('visible');
+  await page.waitForTimeout(300);
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(page.locator('#capture-status')).toContainText('꺼짐');
+  const types = ws.commands.map(command => command.type);
+  expect(types.lastIndexOf('response.viewed')).toBe(types.indexOf('session.stop') - 1);
+  expect(viewed().at(-1).items.map(item => item.responseId)).toEqual(['r2']);
+  expect(totals().r1).toBe(hidden.r1);
+  expect(totals().r2 - hidden.r2).toBeGreaterThanOrEqual(250);
   expect(ws.commands.some(command => command.type === 'response.feedback')).toBe(false);
 });
 

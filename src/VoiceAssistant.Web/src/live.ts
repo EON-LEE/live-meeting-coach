@@ -22,6 +22,7 @@ import { createMenu } from "./live-menu.js";
 import { createSettingsDialog } from "./live-settings-dialog.js";
 import { createFloat } from "./live-float.js";
 import { createFeedback } from "./live-feedback.js";
+import { DwellTracker } from "./live-dwell.js";
 import { $, liveDocument, setData, setHidden, setPressed, setText, setTitle, write } from "./live-dom.js";
 
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
@@ -295,6 +296,7 @@ async function signInAndResume(): Promise<void> {
 }
 
 async function stopLive(message = ""): Promise<void> {
+  reportViewed(true);
   pushing = false; translations.expire(); resetUpdate();
   infoMessage = message; startOffered = false;
   const stopped = controller.stop();
@@ -336,6 +338,7 @@ function changeLiveSource(kind: CaptureSourceKind): void {
 
 /** A dropped or replaced connection: replies in flight end, the next `session.ready` restates the capabilities. */
 function onDisconnect(): void {
+  dwell.drop();
   pushing = false; translations.expire(); resetUpdate();
   state.endReply();
   state.clearError();
@@ -345,6 +348,7 @@ function onDisconnect(): void {
 function onEvent(e: ServerEvent): void {
   // With Korean off nothing is recorded, even while the server has not yet stopped sending it.
   if (e.type === "response.korean") { if (settings.showKorean) { translations.record(e); schedule(); } return; }
+  if (e.responseId) dwell.issued(e.responseId);
   state.apply(e);
   if (e.type === "session.ready") {
     pushing = e.replyKorean === true; canUpdate = e.sessionUpdate === true; updating = false;
@@ -514,6 +518,8 @@ function renderSuggestions(): void {
   setHidden("alternative-card", values.length < 2);
   setText("alternative-text", values[1] ?? "");
   feedback.render(display?.id, controller.canFeedback);
+  dwell.show(controller.canReport && liveDocument().visibilityState !== "hidden" ? display?.id : undefined);
+  reportViewed(false);
   const generating = controller.isReady && state.generating;
   const finishing = !!display && generating && state.current?.id === display.id;
   const previous = state.showsEarlierAnswer(controller.isReady);
@@ -551,6 +557,18 @@ function toggleReadingHold(): void {
 $("hold-answer").addEventListener("click", toggleReadingHold);
 
 const feedback = createFeedback({ root: $("feedback"), send: (id, reason) => controller.feedback(id, reason) });
+
+// How long each reply stayed on screen, for a server that asked (see DwellTracker): sent in batches, and at once, with the
+// reply on screen, when the panel is hidden, the page leaves or live stops.
+const dwell = new DwellTracker(() => performance.now());
+function reportViewed(all: boolean): void {
+  if (all) dwell.show(undefined);
+  for (const items of dwell.take(all)) controller.report(items);
+}
+function viewedVisibility(): void {
+  if (liveDocument().visibilityState === "hidden") reportViewed(true); else schedule();
+}
+document.addEventListener("visibilitychange", viewedVisibility);
 
 // ---------- Session controls: header buttons and the right-click menu ----------
 
@@ -603,7 +621,7 @@ const settingsDialog = createSettingsDialog({
 // ---------- Always-on-top floating window (Document Picture-in-Picture, Edge/Chrome) ----------
 
 const float = createFloat({
-  panel, stage, opened: () => render(),
+  panel, stage, opened: floating => { floating.document.addEventListener("visibilitychange", viewedVisibility); render(); },
   returned: () => { liveMenu.close(false); pending = false; render(); },
 });
 
@@ -613,7 +631,7 @@ const liveChannel = "BroadcastChannel" in window ? new BroadcastChannel("live-co
 liveChannel?.addEventListener("message", event => {
   if (event.data === "started" && controller.active) void stopLive("다른 탭에서 라이브를 시작해 이 탭은 멈췄습니다.");
 });
-window.addEventListener("pagehide", () => { void controller.stop(); });
+window.addEventListener("pagehide", () => { reportViewed(true); void controller.stop(); });
 
 if (debug) Object.assign(window, { __liveCoachDebug: { latency: latency.records, stats: controller.stats } });
 

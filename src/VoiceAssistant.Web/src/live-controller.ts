@@ -1,7 +1,7 @@
 import { isHostSource, type AudioSource, type CaptureSourceKind } from "./capture.js";
 import { audioFrameBytes } from "./audio-limits.js";
 import { CodedError } from "./errors.js";
-import { validateFeedback, type FeedbackReason } from "./feedback.js";
+import { validateFeedback, validateViewed, type FeedbackReason, type ViewedItem } from "./feedback.js";
 import { classifyError, classifyServerError, type Classified, type LiveWarning, type SourceWarning } from "./live-errors.js";
 import { createStartMessage, validateUpdate, type SessionOptions, type SessionUpdate } from "./options.js";
 import type { ServerEvent } from "./protocol.js";
@@ -144,6 +144,8 @@ export class LiveController {
   private ready = false;
   /** The ready connection's server accepts `response.feedback`. */
   private feedbackOn = false;
+  /** The ready connection's server accepts `response.viewed`. */
+  private viewedOn = false;
   private readyAt: number | undefined;
   /**
    * A connection of this live session was ready before, so the next one reconnects or rolls over the same conversation and
@@ -179,6 +181,8 @@ export class LiveController {
   get isReady(): boolean { return this.ready; }
   /** One-tap feedback can be sent: the connection is ready and its server announced `feedback`. */
   get canFeedback(): boolean { return this.ready && this.feedbackOn; }
+  /** On-screen times can be reported: the connection is ready and its server announced `viewed`. */
+  get canReport(): boolean { return this.ready && this.viewedOn; }
   /** The picker or permission prompt is done and audio is being captured. */
   get isCapturing(): boolean { return this.capturing; }
   /** The connection waits for an interactive sign-in; `resume()` continues with the same audio. */
@@ -311,6 +315,14 @@ export class LiveController {
     return true;
   }
 
+  /** How long replies stayed on screen, only to a server whose `session.ready` said `viewed`. Returns whether it was sent. */
+  report(items: readonly ViewedItem[]): boolean {
+    const command = validateViewed(items);
+    if (!this.canReport) return false;
+    this.command(command);
+    return true;
+  }
+
   private command(message: object): void {
     const transport = this.transport;
     if (!this.ready || !transport) return;
@@ -383,7 +395,7 @@ export class LiveController {
     catch { this.halt({ code: "invalid_options", disposition: "fatal", action: "restart" }); return; }
     const transport = this.transport = this.deps.createTransport();
     const connection = this.connection = new AbortController();
-    this.ready = this.feedbackOn = false;
+    this.ready = this.feedbackOn = this.viewedOn = false;
     this.closing = undefined;
     if (this.phase !== "reconnecting") this.setPhase("connecting");
     transport.connect(event => this.receive(generation, event), error => this.lost(generation, error), connection.signal).then(() => {
@@ -411,6 +423,7 @@ export class LiveController {
       this.clearTimer("handshake");
       this.ready = this.resumable = true;
       this.feedbackOn = event.feedback === true;
+      this.viewedOn = event.viewed === true;
       this.readyAt = this.refilledAt = this.lastSentAt = this.clock.now();
       this.tokens = liveLimits.burstBytes;
       this.offline = this.rollingOver = false;

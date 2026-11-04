@@ -22,6 +22,8 @@ export interface ServerEvent {
   sessionUpdate?: boolean;
   /** `session.ready`: this server accepts one-tap feedback on a reply (`response.feedback`). Older servers omit it. */
   feedback?: boolean;
+  /** `session.ready`: this server accepts how long each reply stayed on screen (`response.viewed`). Older servers omit it. */
+  viewed?: boolean;
   /** `session.ready`: how many finalized turns of the previous connection the server continued with (`resumeConversation`). */
   resumedTurns?: number;
   /** `session.updated`: the effective document-search mode. */
@@ -63,10 +65,11 @@ export function parseEvent(data: unknown): ServerEvent {
     if (e.replyKorean !== undefined && typeof e.replyKorean !== "boolean") throw new Error("Invalid replyKorean flag.");
     if (e.sessionUpdate !== undefined && typeof e.sessionUpdate !== "boolean") throw new Error("Invalid sessionUpdate flag.");
     if (e.feedback !== undefined && typeof e.feedback !== "boolean") throw new Error("Invalid feedback flag.");
+    if (e.viewed !== undefined && typeof e.viewed !== "boolean") throw new Error("Invalid viewed flag.");
     if (e.resumedTurns !== undefined && (!Number.isSafeInteger(e.resumedTurns) || (e.resumedTurns as number) < 0))
       throw new Error("Invalid resumedTurns count.");
     return { type, ...(e.replyKorean === true ? { replyKorean: true } : {}), ...(e.sessionUpdate === true ? { sessionUpdate: true } : {}),
-      ...(e.feedback === true ? { feedback: true } : {}),
+      ...(e.feedback === true ? { feedback: true } : {}), ...(e.viewed === true ? { viewed: true } : {}),
       ...(e.resumedTurns === undefined ? {} : { resumedTurns: e.resumedTurns as number }) };
   }
   if (type === "session.updated") {

@@ -482,6 +482,29 @@ test("One-tap feedback goes only to a ready server that announced it, since an o
   assert.equal(h.controller.feedback("r1", "late"), false);
 });
 
+test("On-screen times go only to a ready server that announced them, and never to one that only takes feedback", async () => {
+  const h = harness(), items = [{ responseId: "r1", visibleMs: 1200 }];
+  assert.equal(h.controller.report(items), false, "not connected");
+  await live(h);
+  h.latest().onError(new CodedError("socket_closed", "dropped"));
+  h.clock.advance(3000); await flush();
+  h.latest().ready({ feedback: true });
+  assert.equal(h.controller.canReport, false);
+  assert.equal(h.controller.report(items), false);
+  assert.equal(h.latest().types.includes("response.viewed"), false);
+  h.latest().onError(new CodedError("socket_closed", "dropped"));
+  h.clock.advance(6000); await flush();
+  h.latest().ready({ viewed: true });
+  assert.equal(h.controller.canReport, true);
+  assert.equal(h.controller.canFeedback, false, "each capability on its own");
+  assert.equal(h.controller.report(items), true);
+  assert.deepEqual(h.latest().sent.at(-1), { type: "response.viewed", items });
+  assert.throws(() => h.controller.report([]), /items/);
+  h.controller.stop();
+  assert.equal(h.controller.canReport, false);
+  assert.equal(h.controller.report(items), false);
+});
+
 test("A stop in the middle of a reply ends that reply, so nothing looks as if it were still being generated", async () => withMediaStream(async () => {
   const media = displayMedia(), state = new LiveState();
   const h = harness(() => media.create(), { onEvent: event => state.apply(event), onDisconnect: () => state.endReply() });

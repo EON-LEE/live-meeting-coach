@@ -142,6 +142,9 @@ test("Live: session.ready reports the one-tap feedback capability only when the 
   assert.deepEqual(ready({ feedback: false }), { type: "session.ready" });
   assert.deepEqual(ready({}), { type: "session.ready" }, "an older server leaves it out");
   for (const bad of ["true", 1, null]) assert.throws(() => ready({ feedback: bad }), /feedback/);
+  assert.deepEqual(ready({ feedback: true, viewed: true }), { type: "session.ready", feedback: true, viewed: true });
+  assert.deepEqual(ready({ viewed: false }), { type: "session.ready" });
+  for (const bad of ["true", 0, null]) assert.throws(() => ready({ viewed: bad }), /viewed/);
 });
 
 test("Live: session.ready says how many turns the server resumed, as a whole count", () => {

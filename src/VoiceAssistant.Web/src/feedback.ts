@@ -1,6 +1,7 @@
 /**
  * Content-free signals about replies, sent only to a server that announced them in `session.ready`: one-tap feedback
- * (`response.feedback`). Ids and codes only, never text.
+ * (`response.feedback`) and how long each reply stayed on screen (`response.viewed`). Ids, codes and whole milliseconds,
+ * never text.
  */
 
 /** Why a reply helped ("good") or did not; "missing" means the answer the user needed was not shown. */
@@ -37,4 +38,23 @@ export class FeedbackMarks {
     for (const oldest of this.sent.keys()) { if (this.sent.size <= this.replies) break; this.sent.delete(oldest); }
     return true;
   }
+}
+
+/** `response.viewed` bounds: items per command, and the longest on-screen time one item may report. */
+export const viewedLimits = { items: 20, maxMs: 3_600_000 } as const;
+export interface ViewedItem { responseId: string; visibleMs: number }
+
+/** Validate a `response.viewed` command: 1 to 20 reply ids, each with whole milliseconds from 0 to one hour. */
+export function validateViewed(items: readonly ViewedItem[]): { type: "response.viewed"; items: ViewedItem[] } {
+  if (!Array.isArray(items) || items.length < 1 || items.length > viewedLimits.items)
+    throw new Error(`A viewed report needs 1 to ${viewedLimits.items} items.`);
+  return {
+    type: "response.viewed",
+    items: items.map(item => {
+      const visibleMs: unknown = item?.visibleMs;
+      if (!Number.isSafeInteger(visibleMs) || (visibleMs as number) < 0 || (visibleMs as number) > viewedLimits.maxMs)
+        throw new Error(`visibleMs must be whole milliseconds from 0 to ${viewedLimits.maxMs}.`);
+      return { responseId: responseId(item.responseId), visibleMs: visibleMs as number };
+    }),
+  };
 }
