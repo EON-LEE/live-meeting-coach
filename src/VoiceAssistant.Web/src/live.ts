@@ -20,8 +20,8 @@ import { actionLabels, captureMessage, liveHost, liveMessage, reconnectText, sou
 import { LatencyMarks, debugEnabled } from "./live-latency.js";
 import { createMenu } from "./live-menu.js";
 import { createSettingsDialog } from "./live-settings-dialog.js";
-import { $, liveDocument, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
-  write } from "./live-dom.js";
+import { createFloat } from "./live-float.js";
+import { $, liveDocument, setData, setHidden, setPressed, setText, setTitle, write } from "./live-dom.js";
 
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
 const toggleButton = $<HTMLButtonElement>("live-toggle"), pauseButton = $<HTMLButtonElement>("live-pause");
@@ -568,8 +568,8 @@ function renderControls(): void {
   item("hold").disabled = !state.display;
   write(item("hold"), holdMenuLabel({ held: state.readingHeld, hasNewer: state.hasNewerReply }));
   item("translate").disabled = !settings.showKorean || !translatable(state.display) && !translations.hasFailedTurns;
-  item("float").hidden = !("documentPictureInPicture" in window);
-  write(item("float"), pipWindow ? "작은 창 닫고 페이지로 돌아가기" : "항상 위 작은 창으로 띄우기");
+  item("float").hidden = !float.supported;
+  write(item("float"), float.window ? "작은 창 닫고 페이지로 돌아가기" : "항상 위 작은 창으로 띄우기");
 }
 /** What a menu item or a header button does. Start runs inside the click, so a share picker may open. */
 function runAction(action: string): void {
@@ -580,7 +580,7 @@ function runAction(action: string): void {
   if (action === "hold") toggleReadingHold();
   if (action === "retry") { state.beginRequest(); controller.request(); render(); }
   if (action === "translate") translations.retry();
-  if (action === "float") void toggleFloat();
+  if (action === "float") void float.toggle();
 }
 // The toggle runs what its label says, even if the session changed in the frame before the label caught up.
 toggleButton.addEventListener("click", () => runAction(toggleButton.dataset.command === "stop" ? "stop" : "start"));
@@ -591,45 +591,16 @@ const liveMenu = createMenu({ panel, menu, refresh: renderControls, run: runActi
 // ---------- Settings dialog ----------
 
 const settingsDialog = createSettingsDialog({
-  panel, dialog: $<HTMLDialogElement>("settings"), micDevice, auth, deviceId: () => settings.deviceId, floating: () => !!pipWindow,
+  panel, dialog: $<HTMLDialogElement>("settings"), micDevice, auth, deviceId: () => settings.deviceId, floating: () => !!float.window,
   closed: () => { saveSettings(); syncSession(); render(); },
 });
 
 // ---------- Always-on-top floating window (Document Picture-in-Picture, Edge/Chrome) ----------
 
-interface DocumentPictureInPicture { requestWindow(options: { width: number; height: number }): Promise<Window> }
-let pipWindow: Window | undefined;
-async function toggleFloat(): Promise<void> {
-  if (pipWindow) { pipWindow.close(); return; }
-  const api = (window as unknown as { documentPictureInPicture?: DocumentPictureInPicture }).documentPictureInPicture;
-  if (!api) return;
-  const floating = await api.requestWindow({ width: 550, height: 860 });
-  for (const sheet of [...document.styleSheets]) {
-    try {
-      const style = floating.document.createElement("style");
-      style.textContent = [...sheet.cssRules].map(rule => rule.cssText).join("\n");
-      floating.document.head.append(style);
-    } catch {
-      if (sheet.href) {
-        const link = floating.document.createElement("link"); link.rel = "stylesheet"; link.href = sheet.href;
-        floating.document.head.append(link);
-      }
-    }
-  }
-  floating.document.documentElement.lang = "ko";
-  floating.document.title = "Live Coach";
-  floating.document.body.className = "live-body live-floating";
-  const floatingStage = floating.document.createElement("main");
-  floatingStage.className = "live-stage";
-  floatingStage.append(panel);
-  floating.document.body.append(floatingStage);
-  setLiveDocument(floating.document);
-  pipWindow = floating;
-  floating.addEventListener("pagehide", () => {
-    stage.append(panel); setLiveDocument(document); pipWindow = undefined; liveMenu.close(false); pending = false; render();
-  });
-  render();
-}
+const float = createFloat({
+  panel, stage, opened: () => render(),
+  returned: () => { liveMenu.close(false); pending = false; render(); },
+});
 
 // ---------- One live tab at a time (prevents two tabs from replacing each other's session) ----------
 
