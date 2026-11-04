@@ -103,7 +103,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             if (start is null || start.Type != WebSocketMessageType.Text || !SessionWire.IsValidStart(start.Bytes))
                 throw new ProviderException("invalid_start", "First message must be protocol v1 session.start with PCM16LE 16 kHz mono audio.");
             using (var json = JsonDocument.Parse(start.Bytes))
-                options = json.RootElement.TryGetProperty("options", out var input) ? SessionOptions.Parse(input) : SessionOptions.Legacy;
+                options = (json.RootElement.TryGetProperty("options", out var input) ? SessionOptions.Parse(input) : SessionOptions.Legacy)
+                    with { CacheScope = Guid.NewGuid().ToString("N") };
             var resumedTurns = ResumeConversation();
             if (!options.TranscribeOnly) prefetch = new(provider, objectId, options, lifetime.Token);
             speechOptions = await SpeechOptionsAsync(startup.Token);

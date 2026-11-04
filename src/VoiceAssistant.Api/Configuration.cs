@@ -26,6 +26,20 @@ public sealed class ServiceSettings
     /// Off sends the request exactly as before.
     /// </summary>
     public bool ChatStreamUsage { get; init; }
+    /// <summary>
+    /// The <c>service_tier</c> sent with the live answer request only (auto, default, flex, priority or scale); null sends none.
+    /// </summary>
+    public string? ChatServiceTier { get; init; }
+    /// <summary>
+    /// The live answer's <c>prompt_cache_key</c>: <c>off</c> (default) sends none, <c>static</c> one constant for the deployment
+    /// and prompt version, <c>session</c> a random key per session. Never derived from the user.
+    /// </summary>
+    public string ChatPromptCacheKey { get; init; } = "off";
+    /// <summary>
+    /// Switch: the answer prompt names the response route in its response focus instead of its session context, and puts the
+    /// search-failure instructions after the evidence, so a session's replies share a longer unchanging prefix.
+    /// </summary>
+    public bool RouteInFocus { get; init; }
     public string EmbeddingDeployment { get; init; } = "";
     public string SearchEndpoint { get; init; } = "";
     public string SearchIndex { get; init; } = "";
@@ -71,6 +85,9 @@ public sealed class ServiceSettings
             ChatMaxOutputTokens = ReadChatTokenLimit(config),
             ChatReasoningEffort = ReadReasoningEffort(config, "Azure:ChatReasoningEffort"),
             ChatStreamUsage = ReadSwitch(config, "Azure:ChatStreamUsage"),
+            ChatServiceTier = ReadServiceTier(config),
+            ChatPromptCacheKey = ReadPromptCacheKey(config),
+            RouteInFocus = ReadSwitch(config, "Reply:RouteInFocus"),
             EmbeddingDeployment = Get("Azure:EmbeddingDeployment"),
             SearchEndpoint = Get("Azure:SearchEndpoint"),
             SearchIndex = Get("Azure:SearchIndex"),
@@ -149,6 +166,31 @@ public sealed class ServiceSettings
             System.Text.RegularExpressions.RegexOptions.CultureInvariant)
             ? name
             : throw new InvalidOperationException($"{key} must be a deployment name (letters, digits, '.', '-', '_') when set.");
+    }
+
+    /// <summary>
+    /// Optional <c>Azure:ChatServiceTier</c>: unset or empty sends none; auto, default, flex, priority or scale in any case;
+    /// anything else prevents startup.
+    /// </summary>
+    public static string? ReadServiceTier(IConfiguration config)
+    {
+        var value = config["Azure:ChatServiceTier"];
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var tier = value.Trim().ToLowerInvariant();
+        return tier is "auto" or "default" or "flex" or "priority" or "scale"
+            ? tier
+            : throw new InvalidOperationException("Azure:ChatServiceTier must be auto, default, flex, priority or scale when set.");
+    }
+
+    /// <summary>Optional <c>Azure:ChatPromptCacheKey</c>: unset is off; otherwise off, static or session in any case.</summary>
+    public static string ReadPromptCacheKey(IConfiguration config)
+    {
+        var value = config["Azure:ChatPromptCacheKey"];
+        if (string.IsNullOrWhiteSpace(value)) return "off";
+        var mode = value.Trim().ToLowerInvariant();
+        return mode is "off" or "static" or "session"
+            ? mode
+            : throw new InvalidOperationException("Azure:ChatPromptCacheKey must be off, static or session when set.");
     }
 
     /// <summary>An optional switch: unset is off; <c>true</c> or <c>false</c> in any case; anything else prevents startup.</summary>

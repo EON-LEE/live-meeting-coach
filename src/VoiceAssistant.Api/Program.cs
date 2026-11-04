@@ -107,10 +107,13 @@ namespace VoiceAssistant.Api
             // Content-free: which switches this process runs with, so a rejected request can be traced to one.
             app.Logger.LogInformation("Live reply switches: answer deployment {AnswerDeployment}, answer reasoning effort {AnswerEffort}, " +
                 "early start at final {EarlyStart}, speculative start {SpeculativeStart}, " +
-                "quiet reply {QuietReplyMs} ms, search evidence {SearchMaxEvidence}, material phrase hints {PhraseHints}.",
+                "quiet reply {QuietReplyMs} ms, search evidence {SearchMaxEvidence}, material phrase hints {PhraseHints}, " +
+                "answer stream usage {StreamUsage}, answer service tier {ServiceTier}, answer prompt cache key {PromptCacheKey}, " +
+                "route in focus {RouteInFocus}.",
                 settings.AnswerDeployment ?? "chat deployment", settings.ChatReasoningEffort ?? "unset",
                 features.EarlyStartAtFinal, features.SpeculativeStart, features.QuietReplyMs, settings.SearchMaxEvidence,
-                features.PhraseHints is not null);
+                features.PhraseHints is not null, settings.ChatStreamUsage, settings.ChatServiceTier ?? "unset",
+                settings.ChatPromptCacheKey, settings.RouteInFocus);
             var strictTransport = !app.Environment.IsDevelopment();
             app.Use(async (context, next) =>
             {

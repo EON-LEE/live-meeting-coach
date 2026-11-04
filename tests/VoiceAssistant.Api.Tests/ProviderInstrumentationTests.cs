@@ -48,6 +48,52 @@ public sealed class ProviderInstrumentationTests
         Assert.Throws<InvalidOperationException>(() => ServiceSettings.Read(config, new Environment()));
     }
 
+    [Fact]
+    public void TheAnswerFlagsAreOffByDefault()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Provider:Mode"] = "Fake" }).Build();
+        var settings = ServiceSettings.Read(config, new Environment());
+        Assert.Null(settings.ChatServiceTier);
+        Assert.Equal("off", settings.ChatPromptCacheKey);
+        Assert.False(settings.RouteInFocus);
+    }
+
+    [Theory]
+    [InlineData("Azure:ChatServiceTier", " Priority ", "priority")]
+    [InlineData("Azure:ChatServiceTier", "auto", "auto")]
+    [InlineData("Azure:ChatServiceTier", "", null)]
+    [InlineData("Azure:ChatPromptCacheKey", "STATIC", "static")]
+    [InlineData("Azure:ChatPromptCacheKey", "session", "session")]
+    [InlineData("Azure:ChatPromptCacheKey", " ", "off")]
+    [InlineData("Reply:RouteInFocus", "True", "True")]
+    [InlineData("Reply:RouteInFocus", "false", "False")]
+    public void TheAnswerFlagsAcceptTheirDocumentedValues(string key, string value, string? expected)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [key] = value, ["Provider:Mode"] = "Fake" }).Build();
+        var settings = ServiceSettings.Read(config, new Environment());
+        Assert.Equal(expected, key switch
+        {
+            "Azure:ChatServiceTier" => settings.ChatServiceTier,
+            "Azure:ChatPromptCacheKey" => settings.ChatPromptCacheKey,
+            _ => settings.RouteInFocus.ToString()
+        });
+    }
+
+    [Theory]
+    [InlineData("Azure:ChatServiceTier", "fastest")]
+    [InlineData("Azure:ChatPromptCacheKey", "user")]
+    [InlineData("Azure:ChatPromptCacheKey", "on")]
+    [InlineData("Reply:RouteInFocus", "yes")]
+    public void AnInvalidAnswerFlagPreventsStartup(string key, string value)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [key] = value, ["Provider:Mode"] = "Fake" }).Build();
+        var error = Assert.Throws<InvalidOperationException>(() => ServiceSettings.Read(config, new Environment()));
+        Assert.Contains(key, error.Message);
+    }
+
     [Theory]
     [InlineData(64_000, 1.0, 500, 500)]
     [InlineData(32_000, 0.2, 800, 0)]
