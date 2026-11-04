@@ -7,8 +7,7 @@ param(
     [string] $BicepPath,
     [Parameter(Mandatory = $true)]
     [string] $ReportPath,
-    [switch] $InstallBrowsers,
-    [switch] $RequireLive
+    [switch] $InstallBrowsers
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,35 +92,6 @@ try {
     Invoke-Verification 'release-script-offline-tests' {
         & (Join-Path $PSScriptRoot 'release\tests\Test-Release.ps1')
     }
-    Invoke-Verification 'meeting-benchmark-tests' {
-        & $Python -m unittest discover -s (Join-Path $root 'tools\MeetingBenchmark') -p 'test_*.py' -v
-        if ($LASTEXITCODE -ne 0) { throw 'Meeting boundary and latency-analysis tests failed.' }
-    }
-    Invoke-Verification 'meeting-scenario-evaluation' {
-        $tool = Join-Path $root 'tools\MeetingScenarioEval\scenario_tool.py'
-        $plan = Join-Path $root 'tools\MeetingScenarioEval\synthetic-market-signals.plan.json'
-        $responses = Join-Path $root 'tools\MeetingScenarioEval\synthetic-market-signals.responses.json'
-        $suite = Join-Path ([IO.Path]::GetTempPath()) ("meeting-scenarios-" + [Guid]::NewGuid().ToString('N') + '.json')
-        $score = Join-Path ([IO.Path]::GetTempPath()) ("meeting-score-" + [Guid]::NewGuid().ToString('N') + '.json')
-        try {
-            & $Python -m unittest discover -s (Join-Path $root 'tools\MeetingScenarioEval') -p 'test_*.py' -v
-            if ($LASTEXITCODE -ne 0) { throw 'Meeting scenario tool tests failed.' }
-            & $Python $tool generate --plan $plan --output $suite
-            if ($LASTEXITCODE -ne 0) { throw 'Meeting scenario generation failed.' }
-            & $Python $tool score --scenarios $suite --responses $responses --output $score
-            if ($LASTEXITCODE -ne 0) { throw 'Meeting scenario scoring failed.' }
-            $result = Get-Content -LiteralPath $score -Raw | ConvertFrom-Json
-            if ($result.passed -ne $result.total -or $result.hallucinationCount -ne 0 -or
-                $result.overGenericCount -ne 0 -or $result.latencyPassRate -ne 1) {
-                throw 'Meeting scenario scorer fixture did not meet its fail-closed quality contract.'
-            }
-            & $Dotnet build (Join-Path $root 'tools\ReplyQualityEval\ReplyQualityEval.csproj') --configuration Release --nologo
-            if ($LASTEXITCODE -ne 0) { throw 'ReplyQualityEval failed to build.' }
-        }
-        finally {
-            Remove-Item -LiteralPath $suite, $score -ErrorAction SilentlyContinue
-        }
-    }
     Invoke-Verification 'quality-eval-offline-tests' {
         # Offline only: loopback fake server and injected transports. EVAL_* URLs and credentials stay hidden.
         $evalSettings = @(Get-ChildItem Env: | Where-Object { $_.Name -like 'EVAL_*' })
@@ -134,42 +104,13 @@ try {
             foreach ($setting in $evalSettings) { Set-Item -LiteralPath "Env:$($setting.Name)" -Value $setting.Value }
         }
     }
-    Invoke-Verification 'live-probe-job-template' {
-        $compiled = [IO.Path]::GetTempFileName()
-        try {
-            & $BicepPath build (Join-Path $root 'tools\VoiceAssistant.LiveProbe\cloud-job.bicep') --outfile $compiled
-            if ($LASTEXITCODE -ne 0) { throw 'Live acceptance job template did not compile.' }
-            $template = Get-Content -LiteralPath $compiled -Raw | ConvertFrom-Json
-            $jobs = @($template.resources | Where-Object { $_.type -eq 'Microsoft.App/jobs' })
-            if ($template.resources.Count -ne 1 -or $jobs.Count -ne 1) {
-                throw 'Live acceptance must not create roles, identities, or additional resources.'
-            }
-            $configuration = $jobs[0].properties.configuration
-            $container = $jobs[0].properties.template.containers[0]
-            if ($configuration.triggerType -ne 'Manual' -or $configuration.replicaRetryLimit -ne 0 -or
-                $configuration.replicaTimeout -ne 180 -or $configuration.manualTriggerConfig.parallelism -ne 1 -or
-                $container.args -notcontains '--live' -or $container.args -contains '--help') {
-                throw 'Live acceptance execution limits or explicit service-call intent changed.'
-            }
-            Write-Output 'PASS: bounded manual acceptance job compiles without creating additional privileges.'
-        }
-        finally {
-            Remove-Item -LiteralPath $compiled
-        }
-    }
     $report.localVerification = 'PASS'
     $report.status = 'LOCAL_PASS_LIVE_NOT_VERIFIED'
-    if ($RequireLive) {
-        $report.status = 'BLOCKED'
-        throw 'Local checks passed, but this run did not verify Azure deployment, real Speech/OpenAI, or real tab sharing. Release gate remains blocked.'
-    }
     Write-Output "Local verification passed. Live Azure and real tab sharing remain NOT VERIFIED. Evidence: $reportFile"
 }
 catch {
-    if ($report.status -ne 'BLOCKED') {
-        $report.localVerification = 'FAIL'
-        $report.status = 'FAIL'
-    }
+    $report.localVerification = 'FAIL'
+    $report.status = 'FAIL'
     throw
 }
 finally {

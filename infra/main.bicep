@@ -81,6 +81,8 @@ param sessionMaxMinutes int = 180
 param alertActionGroupId string = ''
 @description('Send container console/system logs to a 30-day Entra-only Log Analytics workspace and create Entra-only Application Insights for content-free metrics.')
 param enableDiagnostics bool = true
+@description('With diagnostics enabled, also deploy the Live Coach Azure Monitor workbook (reply latency, decisions, token use and reliability counters).')
+param deployWorkbook bool = true
 @allowed(['1', '2', '4'])
 @description('Container vCPU. Memory is twice this value in GiB, as the Consumption profile requires. Speech streaming, document extraction and TLS share this single replica.')
 param containerCpu string = '2'
@@ -314,6 +316,16 @@ resource environmentDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-0
       { category: 'ContainerAppConsoleLogs', enabled: true }
       { category: 'ContainerAppSystemLogs', enabled: true }
     ]
+  }
+}
+
+module workbook 'workbook.bicep' = if (enableDiagnostics && deployWorkbook) {
+  name: '${namePrefix}-workbook'
+  params: {
+    workbookDisplayName: 'Live Coach telemetry (${namePrefix})'
+    location: location
+    appInsightsId: insights!.id
+    logAnalyticsWorkspaceId: logs!.id
   }
 }
 

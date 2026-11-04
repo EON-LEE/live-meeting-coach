@@ -24,3 +24,5 @@ TestResults/
 **/private/
 *.private.*
 *.local.json
+# Optional build-time default page for LiveCoach.exe (see LiveCoach.local.props.example).
+src/VoiceAssistant.WebOverlay/LiveCoach.local.props
