@@ -1,64 +1,46 @@
 # One-shot private synthetic knowledge ingestion
 
-This optional deployment reaches the project's **public-network-disabled Blob
-account without weakening its firewall or the web runtime's identity**.
-The target subscription's observed management-group assignment
-`MCAPSGovDeployPolicies`, definition `StorageAccount_PublicNetwork_Modify`, modifies
-Storage public-network access. Do not re-enable public access, add public IP
-exceptions, use account keys/SAS, or expand web runtime Blob roles to work around it.
+This optional deployment writes knowledge through the project's Blob account,
+which has public network access disabled. It does not weaken the Storage firewall
+or the web runtime identity. An organisation policy can modify Storage public
+network access. Do not re-enable public access, add public IP exceptions, use
+account keys or SAS, or give the web runtime Blob roles to work around it.
 
 ## Scope and topology
 
-`main.bicep` creates a dedicated VNet with a delegated Container Apps infrastructure
-subnet and separate Blob private-endpoint subnet; a Blob-only private endpoint
-with an explicit static private IP; linked `privatelink.blob.core.windows.net`
-private DNS; an internal Consumption-profile Container Apps environment; a
-separate user-assigned identity; and one **manual** ingestion job. It never
-starts the job on deployment, schedules it, updates the existing web app or
-storage resource, or deletes resources. No VM, NAT gateway, user credentials,
-corporate-data crawler, or public inbound endpoint is introduced.
+`main.bicep` creates a dedicated VNet, a Blob-only private endpoint with a static
+private IP, a linked `privatelink.blob` private DNS zone, an internal Container
+Apps environment, a separate user-assigned identity and one **manual** job. It
+never starts or schedules the job, changes the web app or the Storage account,
+or deletes resources. It adds no VM, NAT gateway, crawler or public endpoint.
 
-The separate identity receives only existing-resource roles: AcrPull on the
-registry, OpenAI User on the model account, Search Service Contributor + Index
-Data Contributor on Search, and Blob Data Contributor on **documents container**
-only. The existing web runtime retains no Blob roles. Search/OpenAI stay on their
-already-approved HTTPS endpoints; only Blob traffic uses Private Link.
+| Role of the separate identity | Scope |
+| --- | --- |
+| AcrPull | Container registry |
+| Cognitive Services OpenAI User | Azure OpenAI account |
+| Search Service Contributor, Search Index Data Contributor | Search service |
+| Storage Blob Data Contributor | `documents` container only |
 
-One execution has parallelism/completion count 1, **zero automatic retries** and
-an 1800-second deadline. The image uses the official .NET 10 SDK image
-(`dotnet/sdk:10.0-noble`, Ubuntu 24.04), which ships PowerShell 7.6 LTS on
-.NET 10; `mcr.microsoft.com/powershell` publishes 7.6 only as preview tags. It
-runs as an unprivileged UID, with no Azure CLI/Az SDK/user-token cache inside. It gets
-service tokens from the platform's local managed-identity endpoint, selecting
-the separate assigned identity. Tokens/platform identity headers are transient
-memory only and never sent to another service or printed.
+One execution has parallelism 1, **no automatic retries** and an 1800-second
+deadline. The image is based on the .NET 10 SDK image (with PowerShell 7.6) and
+runs as an unprivileged user. It gets tokens from the local managed-identity
+endpoint and never prints them. The job runs `Private-Ingestion.ps1` (reusing
+`KnowledgeSync.psm1`). Before any write, it checks that the Blob hostname
+resolves **only to the configured private IP**.
 
-The job runs `Private-Ingestion.ps1`, reusing `KnowledgeSync.psm1` for schema
-validation, embeddings, index documents, private source writes, lease exclusion
-and version/tombstone behavior. It first verifies that the public Blob hostname
-resolves **exclusively to the configured RFC1918 private IP**. An unexpected
-public/mixed DNS answer fails before data writes. A lease-expired request fails
-instead of weakening concurrency control.
+## Approved input
 
-## Explicitly approved input
+The image contains only `approved-synthetic.md`, an original, visibly fictional
+example. The job never mounts or scans directories, downloads documents, or
+accepts text or paths from environment values. It writes one document
+(`documentId: private-ingestion-synthetic`) whose only ACL entry is the supplied
+user object ID. Do not substitute company data without a separate review.
 
-This image contains only `approved-synthetic.md`, an original, visibly fictional
-Lighthouse practice-meeting example. It is intentionally separate from offline
-fixtures that must not be uploaded. It never mounts or scans local directories,
-downloads documents, or accepts arbitrary text/paths from job environment values.
-It ingests one stable `documentId: private-ingestion-synthetic` with the explicitly
-provided user object GUID as its only ACL, a supplied RFC3339 version, and an
-`example.invalid` synthetic citation (not a claim that a public source exists).
-Do not substitute company data without a separate approval/design review.
-
-## Build and offline validation
-
-From repository root:
+## Build and validate offline
 
 ```powershell
-$docker = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
-& $docker build -f .\infra\private-ingestion\Dockerfile -t voice-private-ingestion:approved .
-& $docker run --rm --network none `
+docker build -f .\infra\private-ingestion\Dockerfile -t voice-private-ingestion:approved .
+docker run --rm --network none `
   -e INGEST_ALLOWED_PRINCIPAL_ID=11111111-1111-4111-8111-111111111111 `
   -e INGEST_DOCUMENT_UPDATED_AT=2026-09-20T00:00:00Z `
   -e INGEST_INDEX_NAME=meeting-knowledge `
@@ -66,174 +48,35 @@ $docker = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
 ```
 
 The expected result is `PASS`, `scope: offline-synthetic-plan`, `uploaded: false`.
-This verifies actual nonroot Linux execution with networking disabled, not cloud
-access. No dependency installation is required inside the image. Push the
-approved image to the project's existing registry via the approved identity path
-and resolve its **actual repository digest**. A local Docker image ID is not the
-registry manifest digest; do not substitute it.
+`scripts\infra\tests\Test-Offline.ps1` runs the template and script checks. Push
+the image and use its **registry digest**, not the local image ID.
 
-## Prepare and deploy, without running ingestion
+## Deploy without running ingestion
 
-Copy `parameters.example.json` to an ignored `parameters.local.json` and replace
-every placeholder with existing resource names, the approved image digest,
-consumer **user object ID**, and document version. Defaults use VNet
-`10.246.0.0/23`, infrastructure `10.246.0.0/24`, endpoints `10.246.1.0/27`, and
-Blob IP `10.246.1.4`. Review these for overlap/policy before deployment. If changing
-them, keep the endpoint IP inside its endpoint subnet. All existing resources
-must be in the selected project resource group/subscription.
+1. Copy `parameters.example.json` to a git-ignored `parameters.local.json`. Fill in the existing resource names, the image digest, the user object ID and an RFC3339 document version.
+2. Check that the default address ranges (`10.246.0.0/23`, endpoint IP `10.246.1.4`) do not overlap other networks.
+3. Keep `createIndex: false` unless the index does not exist yet. An existing index is never replaced.
+4. Keep `confirmExclusiveMaintenance: false` until every application reader is stopped. The parameter records that state; it does not stop anything.
+5. Review the cost of the private endpoint, the private DNS zone and the job run against current [Azure pricing](https://azure.microsoft.com/pricing/).
+6. Compile with Bicep. Then run `deployment group validate` and `what-if` before `create`, through the existing Az adapter (`Import-Module .\scripts\infra\Common.psm1`, `Set-AzureCli -AuthProvider AzPowerShell`, `Invoke-AzJson`). `Deploy.ps1` is not used here because it accepts only the main template.
+7. No deployment step starts ingestion. Before a run, check that the endpoint connection is approved, the DNS link exists and the role assignments have propagated.
 
-Leave `createIndex: false` if the complete compatible index already exists. Set
-it true only for first creation: a pre-existing index is never silently replaced.
-The schema must include `documentId` and `sourceHash` in addition to the backend's
-required fields. Leave `confirmExclusiveMaintenance: false` until the parent
-operator has actually stopped/drained all application readers; changing this
-parameter acknowledges that state but does not perform a stop.
+`enableDiagnostics` (default false) adds a dedicated Log Analytics workspace
+(30-day retention, Entra-only access) for this job's console and system logs
+only. Use it only with this synthetic image.
 
-Prerequisites: approved `Microsoft.Network` and `Microsoft.App` providers, VNet/
-private endpoint/DNS and role-assignment permissions, an approved endpoint
-connection, image pull access, and available regional Container Apps capacity.
-Review the additional private endpoint + private DNS standing charges, potential
-platform network charges and bounded job CPU/memory/embedding/storage operations.
-Coordinator planning estimates of roughly $7.30/month per endpoint and $0.50/month
-per DNS zone are **not verified current quotes or spending caps**; include actual
-region/service prices in the application-scope cost review before apply.
+## Run once, verify and disarm
 
-Compile with verified Bicep, then use the existing Az adapter for **validate and
-what-if before explicit create**. The main application's `Deploy.ps1` is not used
-here because it intentionally fixes its own main-template/parameter contract:
+1. Stop all application readers. Start **one** execution of the job (`POST .../jobs/<job>/start`).
+2. Poll that execution until it is **Succeeded** or **Failed**. Wait a little longer than the 30-minute deadline. Do not start another execution because a client-side wait expired.
+3. After success, query Search for `documentId eq 'private-ingestion-synthetic'` with the approved principal's ACL filter. A different principal must get zero results.
+4. Disarm: set `confirmExclusiveMaintenance: false` and `createIndex: false`, apply the deployment again, and read back `INGEST_CONFIRM_EXCLUSIVE_MAINTENANCE=false` and `INGEST_CREATE_INDEX=false`. A later accidental start then fails at the maintenance guard.
+5. Restart the app and check its health endpoints.
 
-```powershell
-$sub = '<subscription-guid>'   # the subscriptionId in your git-ignored infra/release.local.json
-$group = '<resource-group>'
-$bicep = 'C:\tools\bicep.exe'
-$compiled = 'C:\approved-artifacts\private-ingestion.json'
-$parameters = 'C:\approved-artifacts\private-ingestion.parameters.json'
-& $bicep build .\infra\private-ingestion\main.bicep --outfile $compiled
-if ($LASTEXITCODE -ne 0) { throw 'Bicep compilation failed.' }
-Import-Module .\scripts\infra\Common.psm1 -Force
-Set-AzureCli -AuthProvider AzPowerShell -TimeoutSeconds 900
-$args = @('--subscription', $sub, '--resource-group', $group, '--name', 'voice-private-ingestion',
-  '--template-file', $compiled, '--parameters', ('@' + $parameters), '--mode', 'Incremental')
-$null = Invoke-AzJson (@('deployment', 'group', 'validate') + $args)
-$preview = Invoke-AzJson (@('deployment', 'group', 'what-if') + $args)
-$preview.changes | Select-Object changeType, resourceId
-
-# Only after approval of the network, identity grants, cost scope and preview:
-$result = Invoke-AzJson (@('deployment', 'group', 'create') + $args)
-if ($result.properties.provisioningState -ne 'Succeeded') { throw 'Private route did not finish successfully.' }
-```
-
-No command above starts ingestion. Verify the private endpoint connection is
-Approved, DNS zone group/link are provisioned, and scoped RBAC has propagated.
-Keep the app stopped during ingestion and do not weaken controls if deployment
-or DNS is blocked by policy. Use an approved pre-existing private runner/network
-instead if this subscription cannot provision the required network resources.
-
-### Optional private-job diagnostics
-
-`enableDiagnostics` defaults to **false**. Explicitly setting it true provisions
-a dedicated `${namePrefix}-diagnostics` Log Analytics workspace with 30-day
-retention and Entra-only access, changes only this ingestion environment's
-destination to Azure Monitor, and attaches `ContainerAppConsoleLogs` and
-`ContainerAppSystemLogs` diagnostic categories using its workspace resource ID.
-No shared key is requested; no web environment, request/HTTP category, audio,
-ticket or general-purpose application logging is enabled. Include workspace
-ingestion/retention costs and `Microsoft.OperationalInsights` permissions in the
-review. This opt-in is appropriate only for the fixed synthetic-only image,
-whose entrypoint emits sanitized status/phase JSON and suppresses raw HTTP,
-source content and credential diagnostics. Do not reuse this logging setting
-for a general corporate-document ingestion image without another review.
-
-Terminal replicas can be cleaned up before live console logs are collected.
-The official CLI job-replica/log-auth API uses `2023-11-02-preview`; requesting
-replicas with `2024-03-01` can return Unsupported API version. After deletion,
-console streaming returns no replicas/404, so use opt-in retained diagnostics
-for an explicitly approved retry rather than repeatedly starting jobs blind.
-Environment system events are available through its documented event stream;
-decode a byte-array response as UTF-8 before processing JSON lines and inspect
-only the named job/execution. Never print stream credentials or signed URLs.
-
-The first observed execution pulled/started its image, then exited immediately:
-ARM `string(bool)` had emitted `"True"` while the fail-closed entrypoint requires
-`"true"`. The template now emits explicit lowercase ternary literals for both
-intent flags. Actual failed-execution environment metadata and local
-network-disabled reproduction confirmed this cause; it was not evidence of a
-DNS, NAT, image-pull or managed-identity networking failure.
-
-## Run once and verify
-
-The parent operator owns cloud mutation and uses its existing, explicitly
-selected `$ctx` (matching the target subscription/tenant). Start **one** execution
-after approved maintenance is in effect:
-
-```powershell
-$jobPath = "/subscriptions/$sub/resourceGroups/$group/providers/Microsoft.App/jobs/voice-ingest-job"
-$start = Invoke-AzRestMethod -Method POST -Path "$jobPath/start?api-version=2024-03-01" -DefaultProfile $ctx
-# Inspect only execution name/status, not job environment/token contents.
-```
-
-Record the returned execution name and poll the documented job-execution
-resource/list until that execution reaches **Succeeded** or **Failed**, with a
-bounded overall wait slightly longer than its 30-minute execution deadline.
-Do not start another execution merely because a client-side wait expired.
-Use ARM job-execution status, not the readiness of the unrelated web app, as the
-completion signal. Console output contains only redacted status/safe phase
-markers; Log Analytics collection occurs only with the private diagnostic opt-in.
-
-After `Succeeded`, query only `documentId eq 'private-ingestion-synthetic'` in
-Search using the explicit approved principal ACL filter, confirm expected
-synthetic title/content/version, and verify a different principal returns zero
-matches. The embedding field remains non-retrievable and 1536-dimensional.
-Successful job completion entails source/ledger Blob writes through the private
-endpoint; the external workstation is still correctly blocked from Blob.
-No chat model call is required for this ingestion proof.
-
-**Disarm the job after success and before restarting readers:** set
-`confirmExclusiveMaintenance: false` and `createIndex: false` in the reviewed
-private-ingestion parameters, then apply that configuration incrementally.
-Verify the deployed job environment contains lowercase
-`INGEST_CONFIRM_EXCLUSIVE_MAINTENANCE=false` and `INGEST_CREATE_INDEX=false`,
-and that no execution is still running. Do not start a verification execution:
-reading back the configuration is sufficient. This ensures an accidental future
-manual start fails at the maintenance guard before DNS, token acquisition or
-data writes. A future approved ingestion requires a new actual maintenance
-window and explicit re-arming; a retained manual trigger is not permission to
-write while the web app is serving users.
-
-Only then restart the app, check HTTPS health and unchanged Entra requirements,
-and obtain fresh tickets/sessions. For failure, keep readers stopped, inspect
-redacted phase/status and endpoint/RBAC/schema metadata, and retry **explicitly**
-with the same document version. If the first execution created the index before
-failing, set `createIndex: false` before retrying. If content/ACL/version changes,
-advance the approved RFC3339 version. No automatic network exception, identity
-expansion, schema replacement or data deletion is part of recovery.
-
-## Evidence boundaries
-
-The template compiled without diagnostics; 30 offline private-ingestion checks
-passed for private network shape, separate/scoped identity, bounded manual job,
-private-IP pinning, managed-identity request boundaries and synthetic-only input.
-The Docker image was built and its real nonroot Linux entrypoint passed with
-`--network none -ValidateOnly`. The shared version parser was corrected for
-PowerShell 7.4's materialized JSON dates while still rejecting unzoned versions.
-`Test-Offline.ps1` includes these tests automatically.
-
-After the base moved to the .NET 10 SDK image (2026-10-21), the image was rebuilt
-locally. `pwsh` resolves to `/usr/bin/pwsh` (PowerShell 7.6.7 on .NET 10.0.13)
-and runs as UID 65532 with `HOME=/tmp`. With `--network none` the entrypoint gave
-the same results as the PowerShell 7.4 image: `PASS` for zoned and offset
-versions, a `plan` failure for an unzoned version or an invalid principal, and a
-`maintenance` failure without the acknowledgement. The SDK base makes the image
-about 1.3 GB instead of 554 MB. No job execution was run for this change.
-
-The coordinating session reported live verification on 2026-09-20:
-`voice-ingest-job-l60o2w7` succeeded from 02:02:14 to 02:02:48 KST; the approved
-admin ACL returned one synthetic chunk and an unrelated principal returned
-zero; the vector field remained 1536-dimensional and non-retrievable. Storage
-public networking remained restricted without exceptions. These are
-coordinator-reported live results, distinct from this slice's offline checks.
-No cloud resources or executions were applied by this implementation session.
-The coordinator owns post-success disarming, restart and further acceptance.
+If the run fails, keep readers stopped, inspect the redacted phase and status, and
+retry explicitly with the same document version (with `createIndex: false` if the
+failed run created the index). Recovery never adds network exceptions, identity
+roles, schema replacement or data deletion.
 
 References: [jobs schema](https://learn.microsoft.com/azure/templates/microsoft.app/2024-03-01/jobs),
 [managed identity REST endpoint](https://learn.microsoft.com/azure/container-apps/managed-identity),
