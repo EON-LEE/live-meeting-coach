@@ -75,6 +75,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private int speechNumber;
     private int speechRestarts;
     private Task speechRestart = Task.CompletedTask;
+    /// <summary>How often the settle of the current gather window decided to wait, and whether that armed the quiet timer.</summary>
+    private int gatherWaits;
+    private bool gatherQuietArmed;
+    /// <summary>The last discarded speculative reply, until a reply to its utterance reports it in its summary.</summary>
+    private SpeculationNote? speculationNote;
+    /// <summary>A reply cancelled by the one starting now, whose summary waits until that one runs.</summary>
+    private MeetingMetrics.ResponseMeasurement? replacedMeasurement;
 
     public async Task RunAsync(CancellationToken requestAborted, CancellationToken superseded = default)
     {
@@ -154,7 +161,12 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             pauseNumber++;
                             if (options.ReplySettleMs > 0)
                             {
-                                if (pendingSpeech.Count == 0) pendingSince = message.Timestamp;
+                                if (pendingSpeech.Count == 0)
+                                {
+                                    pendingSince = message.Timestamp;
+                                    gatherWaits = 0;
+                                    gatherQuietArmed = false;
+                                }
                                 pendingSpeech.Add(transcript.Text);
                                 // Gathered speech that already left the bounded history can no longer be a reply target.
                                 if (pendingSpeech.Count > conversation.Count)
@@ -176,7 +188,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             }
                             // Without a settle window every final is answered; with replyOn "questions" only a question or a direct request.
                             else if (!options.QuestionsOnly || ReplyTrigger.Evaluate([transcript.Text], questionsOnly: true) == ReplyDecision.Reply)
-                                await ReplyOrQueueAsync(1, lifetime.Token);
+                                await ReplyOrQueueAsync(1, new("no_settle"), lifetime.Token);
                         }
                         else
                         {
@@ -217,20 +229,25 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                             var changed = TargetChangedSince(started);
                             pendingSpeech.Clear();
                             if (!changed) break;
-                            await ReplyOrQueueAsync(gathered, lifetime.Token, supersedes: started.Generation);
+                            await ReplyOrQueueAsync(gathered, Cause("supersede"), lifetime.Token, supersedes: started.Generation);
                             break;
                         }
                         if (decision == ReplyDecision.Wait)
                         {
+                            gatherWaits++;
                             // Session:QuietReplyMs: a short statement nobody follows up is answered once the room
                             // stays quiet; newer speech re-arms the settle, which voids this timer.
-                            if (features.QuietReplyMs > 0) ScheduleQuiet(lifetime);
+                            if (features.QuietReplyMs > 0)
+                            {
+                                gatherQuietArmed = true;
+                                ScheduleQuiet(lifetime);
+                            }
                             break;
                         }
                         var currentSegments = pendingSpeech.Count;
                         pendingSpeech.Clear();
                         if (decision == ReplyDecision.Discard) break;
-                        await ReplyOrQueueAsync(currentSegments, lifetime.Token);
+                        await ReplyOrQueueAsync(currentSegments, Cause("settle"), lifetime.Token);
                         break;
                     case SessionEventKind.Quiet when message.Generation == settleNumber && pendingSpeech.Count > 0 && earlyReply is null:
                     {
@@ -242,7 +259,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         }
                         var quietSegments = pendingSpeech.Count;
                         pendingSpeech.Clear();
-                        await ReplyOrQueueAsync(quietSegments, lifetime.Token);
+                        await ReplyOrQueueAsync(quietSegments, Cause("quiet"), lifetime.Token);
                         break;
                     }
                     case SessionEventKind.ResponseRequest:
@@ -250,9 +267,11 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         else if (lastTurn is null) await Wire.ErrorAsync("no_transcript", "Wait for a finalized utterance.", true, lifetime.Token);
                         else
                         {
+                            // The gather window it answers, if speech is still gathered; otherwise none.
+                            var requested = pendingSpeech.Count > 0 ? Cause("manual") : new ReplyCause("manual");
                             pendingSpeech.Clear(); settleNumber++; earlyReply = null;
                             DiscardSpeculation("cancelled");
-                            await StartResponseAsync(lifetime.Token, manual: true, currentSegments: 1);
+                            await StartResponseAsync(lifetime.Token, requested, currentSegments: 1);
                         }
                         break;
                     case SessionEventKind.ResponseCancel:
@@ -370,6 +389,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             lifetime.Cancel();
             // A speculative reply still waiting for its final ends with the session, unseen (speculative start).
             DiscardSpeculation("cancelled");
+            // A reply still generating ends with the session, as does the summary of one a failed start replaced.
+            SummarizeReplaced();
+            if (responseActive) Summarize("cancelled");
             // Before anything that can wait: a reconnect of this user waits for the slot, which is released only after this.
             KeepConversation(endReason);
             // Nothing feeds the recognizer once the event loop has ended, so it is stopped now, beside the close handshake: a slow
@@ -705,9 +727,12 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     {
         var segments = pendingSpeech.Count;
         // Like a superseding request, this cancels the window's earlier early reply if it is still running.
-        await StartResponseAsync(lifetime, manual: false, segments);
+        await StartResponseAsync(lifetime, Cause("early_final"), segments);
         earlyReply = (generationNumber, segments);
     }
+
+    /// <summary>Why a reply to the current gather window starts, with how that window's settles went.</summary>
+    private ReplyCause Cause(string startReason) => new(startReason, gatherWaits, gatherQuietArmed);
 
     /// <summary>Session:SpeculativeStart (on top of early start): replies may start on a paused partial.</summary>
     private bool Speculative => features.SpeculativeStart && options.ReplySettleMs > 0 && !options.TranscribeOnly && prefetch is not null;
@@ -799,14 +824,20 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private Speculation? AdoptableSpeculation(Transcript final)
     {
         if (speculation is not { } candidate) return null;
-        if (candidate.TurnId == final.TurnId && candidate.Identity == ResponseRouting.Identity(final.Text) && candidate.Settings == options &&
-            CanStartEarly())
+        // The final's words, when they differ from the speculated ones, are kept for the reply summary's edit distance.
+        string? edited = null;
+        if (candidate.TurnId == final.TurnId)
         {
-            var history = CreateFocusedHistory(pendingSpeech.Count);
-            if (SameHistory(history, candidate.History) && ResponseRouting.Select(final.Text, options, history[..^1]) == candidate.Route)
-                return candidate;
+            var identity = ResponseRouting.Identity(final.Text);
+            if (identity != candidate.Identity) edited = identity;
+            else if (candidate.Settings == options && CanStartEarly())
+            {
+                var history = CreateFocusedHistory(pendingSpeech.Count);
+                if (SameHistory(history, candidate.History) && ResponseRouting.Select(final.Text, options, history[..^1]) == candidate.Route)
+                    return candidate;
+            }
         }
-        DiscardSpeculation("mismatch");
+        DiscardSpeculation("mismatch", edited);
         return null;
     }
 
@@ -825,7 +856,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private async Task AdoptSpeculationAsync(Speculation adopted, CancellationToken lifetime)
     {
         var segments = pendingSpeech.Count;
-        await CancelResponseAsync(lifetime);
+        await CancelResponseAsync(lifetime, replacing: true);
         generation?.Dispose();
         generation = adopted.Cancellation;
         speculation = null;
@@ -840,6 +871,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         measurement.Adopt(lastFinalTimestamp);
         responseMeasurement = measurement;
         measurement.Started();
+        measurement.Began(Cause("early_final"));
+        measurement.SpeculationEnded("adopted");
+        speculationNote = null;
         if (responseRoute == "knowledge") MeetingMetrics.Prefetched(adopted.Prefetched is not null);
         koreanScope = adopted.Scope;
         var number = ++generationNumber;
@@ -851,16 +885,26 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         earlyReply = (number, segments);
         foreach (var held in adopted.Output.Adopt(number)) await HandleReplyEventAsync(held, lifetime);
         issuedResponses.Add(adopted.ResponseId);
+        SummarizeReplaced();
     }
 
-    /// <summary>Drops the speculative reply, if any: its generation is cancelled, and nothing it produced is sent, logged or measured.</summary>
-    private void DiscardSpeculation(string reason)
+    /// <summary>
+    /// Drops the speculative reply, if any: its generation is cancelled, and nothing it produced is sent, logged or measured.
+    /// A reply to the same utterance reports it in its summary, with <paramref name="final"/> words that differed.
+    /// </summary>
+    private void DiscardSpeculation(string reason, string? final = null)
     {
         if (speculation is not { } dropped) return;
         speculation = null;
         dropped.Cancellation.Cancel();
         dropped.Output.Discard();
         dropped.Measurement.Discard();
+        speculationNote = new(dropped.TurnId, reason switch
+        {
+            "mismatch" => "discarded_mismatch",
+            "target_changed" => "discarded_target_changed",
+            _ => "discarded_cancelled"
+        }, final is null ? null : dropped.Identity, final);
         if (dropped.Scope is not null) dropped.Scope.Abandoned = true;
         // No reply waits for the search it took any more: newer speech cancels it, an identical final may still reuse it.
         if (dropped.Prefetched is { } taken) prefetch?.GiveBack(taken);
@@ -873,22 +917,22 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     }
 
     /// <summary>Queues a reply to the latest gathered speech behind the active reply, replacing any reply queued before it.</summary>
-    private void PreparePendingResponse(int currentSegments) =>
+    private void PreparePendingResponse(int currentSegments, ReplyCause cause) =>
         // Timed from its own final, not from whatever later final arrives while it waits.
-        pendingReply = new(CreateFocusedHistory(currentSegments), lastTurn, lastFinalTimestamp);
+        pendingReply = new(CreateFocusedHistory(currentSegments), lastTurn, lastFinalTimestamp, cause, clock.GetTimestamp());
 
     /// <summary>
     /// Starts a reply to the latest <paramref name="segments"/> gathered utterances, or queues it while another reply is active.
     /// A reply that supersedes its own early reply (<paramref name="supersedes"/> is that reply's generation) starts at once.
     /// </summary>
-    private Task ReplyOrQueueAsync(int segments, CancellationToken lifetime, int? supersedes = null)
+    private Task ReplyOrQueueAsync(int segments, ReplyCause cause, CancellationToken lifetime, int? supersedes = null)
     {
         if (responseActive && supersedes != generationNumber)
         {
-            PreparePendingResponse(segments);
+            PreparePendingResponse(segments, cause);
             return Task.CompletedTask;
         }
-        return StartResponseAsync(lifetime, manual: false, segments);
+        return StartResponseAsync(lifetime, cause, segments);
     }
 
     private const string GroundingUnavailableMessage =
@@ -897,7 +941,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
 
     /// <summary>Starts the queued reply, if any, after the active one completed or failed.</summary>
     private Task StartPendingResponseAsync(CancellationToken lifetime) => pendingReply is { } queued
-        ? StartResponseAsync(lifetime, manual: false, currentSegments: 0, queued)
+        ? StartResponseAsync(lifetime, queued.Cause, currentSegments: 0, queued)
         : Task.CompletedTask;
 
     /// <summary>The fixed completion used when neither the materials nor a general model reply are available.</summary>
@@ -921,6 +965,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         if (koreanScope is not null)
             await Wire.SendAsync(new { type = "response.korean", responseId, turnId = responseTurn, index = 0, failed = true }, cancellation);
         responseMeasurement?.ReplyCompleted("unavailable");
+        Summarize("fallback");
         responseActive = false;
     }
 
@@ -957,13 +1002,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         return earlier.With(focusedConversation);
     }
 
-    private async Task StartResponseAsync(CancellationToken lifetime, bool manual, int currentSegments, PendingReply? queued = null)
+    private async Task StartResponseAsync(CancellationToken lifetime, ReplyCause cause, int currentSegments, PendingReply? queued = null)
     {
         // A reply that starts any other way answers what a speculative reply was speculating on, so that one is dropped.
         DiscardSpeculation("target_changed");
         var history = queued?.History ?? CreateFocusedHistory(currentSegments);
         if (history.Length == 0) throw new InvalidOperationException("Response history cannot be empty.");
-        await CancelResponseAsync(lifetime);
+        await CancelResponseAsync(lifetime, replacing: true);
         generation?.Dispose();
         generation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         generation.CancelAfter(ResponseDeadline);
@@ -980,9 +1025,16 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         retrievalPrefetched = prefetched is not null;
         responseActive = true;
         var measurement = new MeetingMetrics.ResponseMeasurement(queued?.FinalTimestamp ?? lastFinalTimestamp, MeetingMetrics.ProviderMode(provider),
-            manual, clock) { Route = responseRoute, ResponseMode = settings.ResponseMode };
+            manual: cause.StartReason == "manual", clock) { Route = responseRoute, ResponseMode = settings.ResponseMode };
         responseMeasurement = measurement;
         measurement.Started();
+        measurement.Began(cause, queued is null ? null : clock.GetElapsedTime(queued.QueuedAt));
+        // A speculative reply discarded on this reply's utterance is reported with it.
+        if (speculationNote is { } note && note.TurnId == responseTurn)
+        {
+            measurement.SpeculationEnded(note.Outcome, note.Speculated, note.Final);
+            speculationNote = null;
+        }
         if (responseRoute == "knowledge") MeetingMetrics.Prefetched(prefetched is not null);
         var number = ++generationNumber;
         var output = new ReplyOutput(events.Writer, number);
@@ -997,6 +1049,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var replies = Replies;
         generationTask = Task.Run(() => replies.GenerateAsync(output, history, route, prefetched, scope, settings, measurement, deadline, token, lifetime));
         issuedResponses.Add(responseId);
+        SummarizeReplaced();
     }
 
     /// <summary>
@@ -1039,7 +1092,11 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         }
     }
 
-    private async Task CancelResponseAsync(CancellationToken cancellation)
+    /// <summary>
+    /// Cancels the active reply. When a new reply <paramref name="replacing"/> it starts, the cancelled reply's summary waits
+    /// until the new one runs (<see cref="SummarizeReplaced"/>), so it adds nothing before the new reply's first line.
+    /// </summary>
+    private async Task CancelResponseAsync(CancellationToken cancellation, bool replacing = false)
     {
         pendingReply = null;
         generation?.Cancel();
@@ -1048,8 +1105,21 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         // A reply that already completed keeps its translations; one that never completed publishes none.
         if (koreanScope is not null) koreanScope.Abandoned = true;
         responseActive = false;
+        if (replacing) replacedMeasurement = responseMeasurement;
+        else Summarize("cancelled");
         responseMeasurement = null;
         await Wire.SendAsync(new { type = "response.cancelled", responseId, turnId = responseTurn }, cancellation);
+    }
+
+    /// <summary>The active reply's summary line, once, from the terminal path it took.</summary>
+    private void Summarize(string outcome) => responseMeasurement?.Summarize(logger, outcome, Volatile.Read(ref speechRestarts));
+
+    /// <summary>The summary line of a reply cancelled for the one that replaced it, once that one runs (or the session ends).</summary>
+    private void SummarizeReplaced()
+    {
+        if (replacedMeasurement is not { } replaced) return;
+        replacedMeasurement = null;
+        replaced.Summarize(logger, "cancelled", Volatile.Read(ref speechRestarts));
     }
 
     /// <summary>
@@ -1080,7 +1150,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         ? new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true, decision = message.Decision }
                         : (object)new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true }, lifetime);
                 if (message.ModelResponse && deltaText.Length > 0) responseMeasurement?.FirstDeltaSent();
-                if (message.ModelResponse && message.PrimaryDone) responseMeasurement?.PrimaryDoneSent();
+                if (message.PrimaryDone) responseMeasurement?.PrimaryDoneSent(message.ModelResponse);
                 if (message.PrimaryDone && message.Decision is { } decision) responseMeasurement?.DecisionSent(decision);
                 break;
             case SessionEventKind.Complete when message.Generation == generationNumber && responseActive:
@@ -1100,6 +1170,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 }, lifetime);
                 if (message.ModelResponse) responseMeasurement?.CompletedSent();
                 responseMeasurement?.ReplyCompleted(completion.Grounding);
+                Summarize("completed");
                 responseActive = false;
                 await StartPendingResponseAsync(lifetime);
                 break;
@@ -1118,6 +1189,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                     await CompleteWithoutGroundingAsync(lifetime);
                 else
                 {
+                    Summarize("error");
                     // The reply queued behind the failed one still starts next.
                     var queued = pendingReply;
                     await CancelResponseAsync(lifetime);

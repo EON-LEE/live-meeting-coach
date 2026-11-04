@@ -58,8 +58,23 @@ internal sealed record WireMessage(byte[] Bytes, WebSocketMessageType Type);
 internal sealed record Completion(string Text, string[] Suggestions, Source[] Sources, string Grounding, string ResponseRoute, bool RetrievalPrefetched, bool RespondNow = false);
 internal sealed record KoreanLine(KoreanScope Scope, int Index, string? Korean);
 
-/// <summary>A reply queued behind the active one: the history it answers, its turn, and the final it is timed from.</summary>
-internal sealed record PendingReply(ConversationTurn[] History, string? Turn, long FinalTimestamp);
+/// <summary>
+/// A reply queued behind the active one: the history it answers, its turn, the final it is timed from, why it was started
+/// and when it was queued.
+/// </summary>
+internal sealed record PendingReply(ConversationTurn[] History, string? Turn, long FinalTimestamp, ReplyCause Cause, long QueuedAt);
+
+/// <summary>
+/// Why a reply started, its summary's <c>start_reason</c>: manual, no_settle, early_final, settle, supersede or quiet. With how
+/// often the settle of its gather window decided to wait and whether that armed the quiet timer.
+/// </summary>
+internal readonly record struct ReplyCause(string StartReason, int Waits = 0, bool QuietArmed = false);
+
+/// <summary>
+/// A speculative reply that was discarded, kept for the summary of the next reply to the same utterance. A mismatch with
+/// different words also keeps both (never logged) for the summary's edit-distance bucket.
+/// </summary>
+internal sealed record SpeculationNote(string TurnId, string Outcome, string? Speculated = null, string? Final = null);
 
 /// <summary>A reply generated ahead of its final (Session:SpeculativeStart). Nothing of it is sent, logged or measured until the final adopts it.</summary>
 internal sealed record Speculation(string TurnId, string Identity, ConversationTurn[] History, string Route, SessionOptions Settings,

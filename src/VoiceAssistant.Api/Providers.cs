@@ -56,8 +56,17 @@ public sealed class FakeMeetingProvider : IMeetingProvider
 {
     public const string TranscriptText = "Could you briefly explain the next steps?";
     public const string AnswerText = "Let's confirm the goal, agree on the next action, and assign an owner.";
+    /// <summary>
+    /// A session started with this topic hears <see cref="StatementText"/> instead of the question: a statement long enough to be
+    /// answered, which the turn classifier calls <c>listen</c>. Fake mode only, for end-to-end tests of the decision.
+    /// </summary>
+    public const string ListenTopic = "fake-listen";
+    public const string StatementText = "We already finished the migration plan and the team will share the final numbers on Friday.";
     public Task<ISpeechStream> StartSpeechAsync(Action<Transcript> transcript, Action<ProviderException> error, CancellationToken cancellation) =>
-        Task.FromResult<ISpeechStream>(new FakeSpeechStream(transcript));
+        Task.FromResult<ISpeechStream>(new FakeSpeechStream(transcript, listen: false));
+    public Task<ISpeechStream> StartSpeechAsync(SessionOptions options, Action<Transcript> transcript,
+        Action<ProviderException> error, CancellationToken cancellation) =>
+        Task.FromResult<ISpeechStream>(new FakeSpeechStream(transcript, listen: options.Topic == ListenTopic));
     public Task<Grounding> RetrieveAsync(string query, string objectId, CancellationToken cancellation) =>
         Task.FromResult(new Grounding("disabled", []));
 
@@ -84,7 +93,7 @@ public sealed class FakeMeetingProvider : IMeetingProvider
     public Task<string?> TranslateReplyAsync(string english, TranslationContext context, CancellationToken cancellation) =>
         Task.FromResult<string?>("[fake-ko] " + english);
 
-    private sealed class FakeSpeechStream(Action<Transcript> transcript) : ISpeechStream
+    private sealed class FakeSpeechStream(Action<Transcript> transcript, bool listen) : ISpeechStream
     {
         private int bytes;
         private int silence;
@@ -106,8 +115,8 @@ public sealed class FakeMeetingProvider : IMeetingProvider
             if (bytes < 640) return;
             emitted = true;
             var turnId = Guid.NewGuid().ToString("N");
-            transcript(new(turnId, 1, "Could you briefly explain", false));
-            transcript(new(turnId, 2, TranscriptText, true));
+            transcript(new(turnId, 1, listen ? "We already finished the migration plan" : "Could you briefly explain", false));
+            transcript(new(turnId, 2, listen ? StatementText : TranscriptText, true));
         }
         public Task CompleteInputAsync(CancellationToken cancellation)
         {

@@ -64,6 +64,10 @@ public static class MeetingMetrics
         "How long the client reported a reply stayed visible.");
     private static readonly Histogram<double> RecognitionLag = Milliseconds("voiceassistant.speech.recognition_lag",
         "Audio pushed to the recognizer minus the end of the recognized audio, when a partial or final arrives.");
+    private static readonly Counter<long> Outcomes = Count("voiceassistant.reply.outcomes", "{reply}",
+        "Replies by why they started, the turn classifier's outcome and how they ended (completed, fallback, cancelled, error).");
+    private static readonly Histogram<double> QueueWait = Milliseconds("voiceassistant.reply.queue_wait",
+        "Replies queued behind an active reply: queued to started.");
     static MeetingMetrics() => Meter.CreateObservableGauge(
         "voiceassistant.sessions.active", () => Volatile.Read(ref activeSessions), "{session}", "Open meeting sessions.");
 
@@ -206,8 +210,17 @@ public static class MeetingMetrics
         private int primaryRecorded;
         private int tokenRecorded;
         private int decisionRecorded;
+        private int summarized;
         private long requestSent;
         private volatile string grounding = "pending";
+        // The summary line: set by the session's event loop, except the classifier outcome (the reply's generation).
+        private ReplyCause cause = new("none");
+        private double queueWaitMs = -1;
+        private string speculationOutcome = "none";
+        private (string Speculated, string Final)? speculationEdit;
+        private volatile string classifier = "none";
+        private string decisionSent = "none";
+        private long firstLineMs = -1;
         public string Route { get; init; } = "knowledge";
         public string ResponseMode { get; init; } = "grounded";
 
@@ -278,6 +291,26 @@ public static class MeetingMetrics
 
         public void Started() => Record(SettleWait, SinceFinal(), Tags(withGrounding: false));
 
+        /// <summary>
+        /// Why this reply started (event loop only), and for a reply that was queued behind another how long it waited there,
+        /// from being queued to starting; recorded with the summary, so nothing is added before the first line.
+        /// </summary>
+        internal void Began(ReplyCause reason, TimeSpan? queued = null)
+        {
+            cause = reason;
+            if (queued is { } wait) queueWaitMs = wait.TotalMilliseconds;
+        }
+
+        /// <summary>
+        /// What became of a speculative reply on this reply's utterance (event loop only): adopted (this is it), or discarded
+        /// with its reason. The words of a mismatch are kept only to bucket their edit distance in the summary.
+        /// </summary>
+        internal void SpeculationEnded(string outcome, string? speculated = null, string? final = null)
+        {
+            speculationOutcome = outcome;
+            speculationEdit = speculated is not null && final is not null ? (speculated, final) : null;
+        }
+
         /// <summary>Documents (or their absence) are known; a knowledge route also reports how long the reply waited for them.</summary>
         public void GroundingReady(string status, TimeSpan? waited = null, bool prefetched = false)
         {
@@ -302,9 +335,13 @@ public static class MeetingMetrics
             if (Once(ref firstRecorded)) Record(FirstDelta, SinceFinal(), Tags());
         }
 
-        public void PrimaryDoneSent()
+        /// <summary>The primary line was sent; only a model reply records the latency metric, every reply its summary's first line.</summary>
+        public void PrimaryDoneSent(bool modelResponse = true)
         {
-            if (Once(ref primaryRecorded)) Record(PrimaryDone, SinceFinal(), Tags());
+            if (!Once(ref primaryRecorded)) return;
+            var sinceFinal = SinceFinal();
+            Interlocked.Exchange(ref firstLineMs, (long)sinceFinal);
+            if (modelResponse) Record(PrimaryDone, sinceFinal, Tags());
         }
 
         public void CompletedSent()
@@ -314,6 +351,7 @@ public static class MeetingMetrics
 
         public void ClassifierWaited(TimeSpan waited, string outcome)
         {
+            classifier = Bounded(outcome);
             var tags = Tags();
             tags.Add("outcome", Bounded(outcome));
             Record(ClassifierWait, waited.TotalMilliseconds, tags);
@@ -324,6 +362,7 @@ public static class MeetingMetrics
         {
             if (!Once(ref decisionRecorded)) return;
             var value = decision is "respond" or "listen" ? decision : "unknown";
+            decisionSent = value;
             Record(() => Decisions.Add(1, new KeyValuePair<string, object?>("decision", value)));
         }
 
@@ -341,6 +380,68 @@ public static class MeetingMetrics
             var tags = Tags(withGrounding: false);
             tags.Add("grounding", Bounded(status));
             Record(() => Grounding.Add(1, tags));
+        }
+
+        /// <summary>
+        /// The one content-free summary line of this reply, from whichever of its terminal paths comes first: <c>completed</c>,
+        /// <c>fallback</c> (the fixed notice), <c>cancelled</c> or <c>error</c>; with its outcome count. Recorded like every
+        /// other measurement, so a discarded speculation logs nothing. Never any text, id or user.
+        /// </summary>
+        internal void Summarize(ILogger logger, string outcome, int speechRestarts)
+        {
+            if (!Once(ref summarized)) return;
+            var (reason, verdict, decision) = (cause.StartReason, classifier, decisionSent);
+            var (waits, quietArmed, queueWait) = (cause.Waits, cause.QuietArmed ? "true" : "false", queueWaitMs);
+            var (speculation, specEdit, firstLine) = (speculationOutcome, SpecEdit(), Interlocked.Read(ref firstLineMs));
+            var queueTags = queueWait >= 0 ? Tags(withGrounding: false) : default;
+            Record(() =>
+            {
+                if (queueWait >= 0) QueueWait.Record(queueWait, queueTags);
+                Outcomes.Add(1, new("start_reason", reason), new("classifier", verdict), new("outcome", outcome));
+                logger.LogInformation("ReplySummary outcome={Outcome} start_reason={StartReason} classifier={Classifier} decision={Decision} " +
+                    "waits={Waits} quiet_armed={QuietArmed} queued={Queued} queue_wait_ms={QueueWaitMs} speculation={Speculation} " +
+                    "spec_edit={SpecEdit} speech_restarts={SpeechRestarts} first_line_ms={FirstLineMs}", outcome, reason, verdict, decision,
+                    waits, quietArmed, queueWait >= 0 ? "true" : "false", queueWait >= 0 ? (long)queueWait : -1L, speculation, specEdit,
+                    speechRestarts, firstLine);
+            });
+        }
+
+        /// <summary>
+        /// How far the final's words were from a speculative reply's: <c>0</c> when it was adopted, a bucket of the edit distance
+        /// after a mismatch of the words, and <c>none</c> when no words were compared. Worked out only for the summary.
+        /// </summary>
+        private string SpecEdit()
+        {
+            if (speculationOutcome == "adopted") return "0";
+            if (speculationEdit is not { } edit) return "none";
+            if (edit.Speculated.Length > MaxEditLength || edit.Final.Length > MaxEditLength) return "over_cap";
+            return EditDistance(edit.Speculated, edit.Final) switch
+            {
+                0 => "0",
+                1 => "1",
+                <= 3 => "2-3",
+                <= 8 => "4-8",
+                _ => "9+"
+            };
+        }
+
+        private const int MaxEditLength = 256;
+
+        /// <summary>The Levenshtein distance of two strings: the fewest single-character insertions, deletions and substitutions.</summary>
+        internal static int EditDistance(string first, string second)
+        {
+            var previous = new int[second.Length + 1];
+            var current = new int[second.Length + 1];
+            for (var column = 0; column <= second.Length; column++) previous[column] = column;
+            for (var row = 1; row <= first.Length; row++)
+            {
+                current[0] = row;
+                for (var column = 1; column <= second.Length; column++)
+                    current[column] = Math.Min(Math.Min(current[column - 1], previous[column]) + 1,
+                        previous[column - 1] + (first[row - 1] == second[column - 1] ? 0 : 1));
+                (previous, current) = (current, previous);
+            }
+            return previous[second.Length];
         }
     }
 }
