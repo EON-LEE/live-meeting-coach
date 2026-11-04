@@ -103,6 +103,8 @@ html, body.live-body { margin: 0; min-height: 100%; }
 .live-hold:hover:not(:disabled), .live-hold[aria-pressed="true"] { background: #344d6b; border-color: #a9c9ff; }
 .live-hold:focus-visible, .live-details summary:focus-visible { outline: 2px solid #a9c9ff; outline-offset: 3px; }
 .live-hold:disabled { color: #9baec9; cursor: default; background: transparent; }
+/* The page, not the user, keeps the answer while the other person talks: same button, a quieter outline. */
+.live-answers[data-hold="listen"] .live-hold { border-style: dashed; }
 /* A− / A+ for the English answer size, next to the answer. */
 .live-size { display: inline-flex; margin-left: auto; }
 .live-size button {

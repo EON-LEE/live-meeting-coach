@@ -8,6 +8,8 @@ import type { Grounding } from "./protocol.js";
 export interface ReadingInput {
   /** A reply is held on screen (`LiveState.readingHeld`). */
   held: boolean;
+  /** The page holds it, not the user, because the other person is still talking (`LiveState.autoHeld`). */
+  autoHeld: boolean;
   /** A newer reply waits behind the hold (`LiveState.hasNewerReply`). */
   hasNewer: boolean;
   /** Connected, and a newer reply is being produced. */
@@ -26,9 +28,10 @@ export interface ReadingInput {
 
 export function readingStatus(input: ReadingInput): string {
   if (input.held) {
-    return input.hasNewer ? "새 답변 도착 · 고정을 해제하면 표시합니다"
-      : input.generating ? "화면 고정됨 · 새 답변 준비 중"
-        : "화면 고정됨 · 오디오 전송 상태는 위에서 확인하세요";
+    return input.autoHeld ? "상대가 말하는 중 · 이전 답변 유지"
+      : input.hasNewer ? "새 답변 도착 · 고정을 해제하면 표시합니다"
+        : input.generating ? "화면 고정됨 · 새 답변 준비 중"
+          : "화면 고정됨 · 오디오 전송 상태는 위에서 확인하세요";
   }
   if (input.finishing) return "추천 문장입니다 · 대안과 근거를 확인하는 중";
   if (input.generating) return input.display ? "새 답변 준비 중 · 아래는 이전 질문용 답변" : "답변 준비 중 · 완성되면 표시합니다";

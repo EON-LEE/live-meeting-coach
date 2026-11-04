@@ -40,3 +40,38 @@ test("Reading hold: the held reply gains what arrives for it later, and a withdr
   hold.show(reply("r3")); hold.hold(); hold.reset();
   assert.deepEqual([hold.display, hold.isHeld], [null, false]);
 });
+
+test("Reading hold: the page releases only its own hold, and its hold never outlives the newer reply it waited for", () => {
+  const page = new ReadingHold<Reply>();
+  page.show(reply("r1"));
+  page.hold("listen");
+  assert.equal(page.auto, true);
+  page.hold();
+  assert.equal(page.auto, true, "an existing hold stays as it is");
+  page.show(reply("r2"));
+  page.releaseAuto();
+  assert.deepEqual([page.display?.id, page.isHeld], ["r2", false]);
+
+  const user = new ReadingHold<Reply>();
+  user.show(reply("r1"));
+  user.hold();
+  user.hold("listen");
+  user.show(reply("r2"));
+  user.releaseAuto();
+  user.restart();
+  assert.deepEqual([user.display?.id, user.isHeld, user.auto], ["r1", true, false], "the user's hold stays");
+
+  const withdrawn = new ReadingHold<Reply>();
+  withdrawn.show(reply("r1"));
+  withdrawn.hold("listen");
+  withdrawn.show(reply("r2"));
+  withdrawn.withdraw("r2");
+  assert.deepEqual([withdrawn.display?.id, withdrawn.shown?.id, withdrawn.isHeld], ["r1", "r1", false], "the held answer simply stays");
+
+  const restarted = new ReadingHold<Reply>();
+  restarted.show(reply("r1"));
+  restarted.hold("listen");
+  restarted.show(reply("r2"));
+  restarted.restart();
+  assert.deepEqual([restarted.display?.id, restarted.isHeld], ["r2", false]);
+});

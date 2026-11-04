@@ -4,11 +4,12 @@ import { groundingBadge, groundingDetail, holdButton, holdMenuLabel, readingStat
   type ReadingInput } from "../../src/VoiceAssistant.Web/src/reading-view.js";
 
 const idle = "시작을 누르면 듣기 시작 · 설정은 우클릭 메뉴";
-const input = (extra: Partial<ReadingInput>): ReadingInput => ({ held: false, hasNewer: false, generating: false, finishing: false,
+const input = (extra: Partial<ReadingInput>): ReadingInput => ({ held: false, autoHeld: false, hasNewer: false, generating: false, finishing: false,
   display: false, interrupted: false, active: false, idle, ...extra });
 
 test("Reading view: the status line says what the answer on screen is, most specific first", () => {
   const cases: [Partial<ReadingInput>, string][] = [
+    [{ held: true, autoHeld: true, display: true, hasNewer: true, generating: true }, "상대가 말하는 중 · 이전 답변 유지"],
     [{ held: true, display: true, hasNewer: true, generating: true }, "새 답변 도착 · 고정을 해제하면 표시합니다"],
     [{ held: true, display: true, generating: true }, "화면 고정됨 · 새 답변 준비 중"],
     [{ held: true, display: true, active: true }, "화면 고정됨 · 오디오 전송 상태는 위에서 확인하세요"],
@@ -28,6 +29,8 @@ test("Reading view: the hold button and its menu item hold, release, or show the
   assert.deepEqual(holdButton(input({ display: true })), { label: "답변 고정", pressed: false, disabled: false });
   assert.deepEqual(holdButton(input({ display: true, held: true })), { label: "고정 해제", pressed: true, disabled: false });
   assert.deepEqual(holdButton(input({ display: true, held: true, hasNewer: true })), { label: "새 답변 보기", pressed: true, disabled: false });
+  assert.deepEqual(holdButton(input({ display: true, held: true, autoHeld: true, hasNewer: true })),
+    { label: "새 답변 보기", pressed: true, disabled: false }, "the page's own hold offers the newer reply the same way");
   assert.equal(holdMenuLabel(input({})), "읽는 동안 답변 고정 (오디오는 계속 듣기)");
   assert.equal(holdMenuLabel(input({ held: true })), "화면 고정 해제");
   assert.equal(holdMenuLabel(input({ held: true, hasNewer: true })), "새 답변 보기 / 화면 고정 해제");

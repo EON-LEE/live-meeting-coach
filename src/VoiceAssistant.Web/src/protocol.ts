@@ -1,6 +1,8 @@
 export interface Source { title: string; url: string; updatedAt?: string | null }
 export type Grounding = "disabled" | "grounded" | "unavailable" | "no_matches";
 export type ResponseRoute = "transcript" | "profile" | "knowledge";
+/** Whether a reply suits the moment ("respond") or the other person is still talking and it is for later ("listen"). */
+export type ReplyDecision = "respond" | "listen";
 export interface ServerEvent {
   type: string; turnId?: string; revision?: number; text?: string; responseId?: string;
   sources?: Source[]; code?: string; message?: string; retryable?: boolean;
@@ -30,6 +32,11 @@ export interface ServerEvent {
   segments?: number;
   /** `response.delta`: the primary line (first suggestion) is complete with this delta; sent at most once per response. */
   primaryDone?: boolean;
+  /**
+   * `response.delta` with `primaryDone`: the server's reading of the moment. Older servers omit it, and an unknown value is
+   * dropped: both mean "respond".
+   */
+  decision?: ReplyDecision;
   /** `response.korean`: the reply line (0 = primary, 1 = alternative) and its Korean meaning, or `failed` when it has none. */
   index?: number; korean?: string; failed?: boolean;
 }
@@ -89,7 +96,8 @@ export function parseEvent(data: unknown): ServerEvent {
     if (e.primaryDone !== undefined && typeof e.primaryDone !== "boolean") throw new Error("Invalid primaryDone flag.");
     // An empty delta exists only to say that the primary line is already complete.
     if (!delta && e.primaryDone !== true) throw new Error("A response delta must carry text unless it marks the primary line done.");
-    return { type, turnId, responseId, text: delta, ...(e.primaryDone === true ? { primaryDone: true } : {}) };
+    const decision = e.primaryDone === true && (e.decision === "respond" || e.decision === "listen") ? e.decision : undefined;
+    return { type, turnId, responseId, text: delta, ...(e.primaryDone === true ? { primaryDone: true } : {}), ...(decision ? { decision } : {}) };
   }
   if (type === "response.korean") {
     if (e.index !== 0 && e.index !== 1) throw new Error("Invalid reply line index.");

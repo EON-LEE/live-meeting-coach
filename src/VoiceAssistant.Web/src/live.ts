@@ -521,11 +521,12 @@ function renderSuggestions(): void {
   setText("alternative-label", labels.alternative);
   const answersSection = panel.querySelector<HTMLElement>(".live-answers")!;
   setData(answersSection, "previous", String(previous));
+  setData(answersSection, "hold", state.autoHeld ? "listen" : undefined);
   // What the reply answers: every final gathered into it (see LiveState), or the latest speech before any reply.
   setText("question-text", display?.question ?? state.turns.find(turn => turn.id === display?.turnId)?.text
     ?? (display ? "이전 대화" : state.latest?.text ?? "영어 대화를 기다리고 있어요."));
-  const reading: ReadingInput = { held: state.readingHeld, hasNewer: state.hasNewerReply, generating, finishing, display: !!display,
-    interrupted: !!display?.interrupted, active: controller.active, idle: idleStatus(settings) };
+  const reading: ReadingInput = { held: state.readingHeld, autoHeld: state.autoHeld, hasNewer: state.hasNewerReply, generating, finishing,
+    display: !!display, interrupted: !!display?.interrupted, active: controller.active, idle: idleStatus(settings) };
   setText("reading-status", readingStatus(reading));
   const hold = $<HTMLButtonElement>("hold-answer"), holdView = holdButton(reading);
   hold.disabled = holdView.disabled;

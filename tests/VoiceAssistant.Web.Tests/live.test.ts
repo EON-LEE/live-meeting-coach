@@ -546,6 +546,104 @@ test("Live: a held primary line gains its alternative, grounding and sources whe
   assert.deepEqual(answers(state.display), ["Alex owns it.", "I think Alex owns that."]);
 });
 
+test("Live: decision parses only with primaryDone, and an unknown value is dropped rather than rejected", () => {
+  const delta = (extra: object) => JSON.stringify({ type: "response.delta", turnId: "t", responseId: "r", text: "Yes.", ...extra });
+  const base = { type: "response.delta", turnId: "t", responseId: "r", text: "Yes." };
+  assert.deepEqual(parseEvent(delta({ primaryDone: true, decision: "listen" })), { ...base, primaryDone: true, decision: "listen" });
+  assert.deepEqual(parseEvent(delta({ primaryDone: true, decision: "respond" })), { ...base, primaryDone: true, decision: "respond" });
+  for (const decision of ["wait", "", 1, null, true, { listen: true }])
+    assert.deepEqual(parseEvent(delta({ primaryDone: true, decision })), { ...base, primaryDone: true }, JSON.stringify(decision));
+  assert.deepEqual(parseEvent(delta({ decision: "listen" })), base, "without primaryDone");
+  assert.deepEqual(parseEvent(delta({ primaryDone: false, decision: "listen" })), base);
+});
+
+/** `answered()` with a second reply `r2` whose primary line is done with `decision`. */
+function second(state: LiveState, decision?: "respond" | "listen", id = "r2", turn = "two"): LiveState {
+  state.apply(final(turn, "Go on?"));
+  state.apply({ type: "response.started", turnId: turn, responseId: id });
+  state.apply({ type: "response.delta", turnId: turn, responseId: id, text: "Next answer.", primaryDone: true, ...decision ? { decision } : {} });
+  return state;
+}
+
+test("Live: while the other person is still talking the answer on screen stays, and the newer one waits one tap away", () => {
+  const state = second(answered(), "listen");
+  assert.equal(state.display?.id, "r1", "the screen does not swap");
+  assert.equal(state.readingHeld, true);
+  assert.equal(state.autoHeld, true);
+  assert.equal(state.hasNewerReply, true);
+  assert.equal(state.shown?.id, "r2", "the newer reply is kept, never dropped");
+  assert.equal(state.shown?.decision, "listen");
+  assert.equal(state.showsEarlierAnswer(true), false, "the answer on screen is still the one to read, so it is not dimmed");
+  state.apply({ type: "response.completed", turnId: "two", responseId: "r2", text: "Next answer.", sources: [] });
+  assert.equal(state.display?.id, "r1", "its completion does not swap the screen either");
+  state.releaseDisplay();
+  assert.equal(state.display?.id, "r2", "새 답변 보기 shows it");
+  assert.equal(state.autoHeld, false);
+
+  const first = second(new LiveState(), "listen");
+  assert.equal(first.display?.id, "r2", "with nothing on screen a listen reply is shown");
+  assert.equal(first.readingHeld, false);
+
+  const respond = second(answered(), "respond");
+  assert.equal(respond.display?.id, "r2");
+  assert.equal(respond.readingHeld, false);
+  const none = second(answered());
+  assert.equal(none.display?.id, "r2", "no decision means respond");
+});
+
+test("Live: a later reply that suits the moment ends the automatic hold, but never the user's own hold", () => {
+  const state = second(answered(), "listen");
+  second(state, "listen", "r3", "three");
+  assert.equal(state.display?.id, "r1", "another listen reply keeps the hold");
+  assert.equal(state.shown?.id, "r3");
+  second(state, "respond", "r4", "four");
+  assert.equal(state.display?.id, "r4");
+  assert.equal(state.readingHeld, false);
+  second(state, undefined, "r5", "five");
+  assert.equal(state.display?.id, "r5");
+
+  const manual = answered();
+  manual.holdDisplay();
+  second(manual, "listen");
+  assert.equal(manual.autoHeld, false, "the user's hold stays the user's");
+  second(manual, "respond", "r3", "three");
+  assert.equal(manual.display?.id, "r1", "a respond reply never releases the user's hold");
+  assert.equal(manual.readingHeld, true);
+
+  const completed = second(answered(), "listen");
+  completed.apply(final("three", "Done?"));
+  completed.apply({ type: "response.started", turnId: "three", responseId: "r3" });
+  completed.apply({ type: "response.completed", turnId: "three", responseId: "r3", text: "Done.", sources: [] });
+  assert.equal(completed.display?.id, "r3", "a reply readable only at completion releases it too");
+});
+
+test("Live: the automatic hold ends with a reset, a continued session, or the withdrawal of the reply it held back", () => {
+  const reset = second(answered(), "listen");
+  reset.resetSession();
+  assert.deepEqual([reset.readingHeld, reset.autoHeld, reset.display], [false, false, null]);
+
+  const continued = second(answered(), "listen");
+  continued.restart(true);
+  assert.equal(continued.readingHeld, false, "continuing drops the page's hold");
+  assert.equal(continued.display?.id, "r2", "and shows the newest reply");
+  const manual = answered();
+  manual.holdDisplay();
+  second(manual, "listen");
+  manual.restart(true);
+  assert.equal(manual.display?.id, "r1", "the user's hold stays when continuing");
+
+  const filteredReply = answered();
+  filteredReply.apply(final("two", "Go on?"));
+  filteredReply.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  filteredReply.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Withheld.", primaryDone: true, decision: "listen" });
+  assert.equal(filteredReply.autoHeld, true);
+  filteredReply.apply(filtered);
+  filteredReply.apply({ type: "response.cancelled", turnId: "two", responseId: "r2" });
+  assert.equal(filteredReply.display?.id, "r1", "the answer it held stays on screen");
+  assert.deepEqual([filteredReply.readingHeld, filteredReply.autoHeld, filteredReply.hasNewerReply], [false, false, false]);
+  assert.equal(filteredReply.shown?.id, "r1");
+});
+
 test("Live: long speech is translated in bounded chunks without losing words", () => {
   const text = Array.from({ length: 40 }, () => "Copilot helps teams prepare a launch plan.").join(" ");
   const chunks = translationChunks(text);
