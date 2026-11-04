@@ -479,6 +479,73 @@ test("Live: the Korean line under an unfinished or interrupted primary line neve
   assert.equal(translatable(null), false);
 });
 
+/** A state showing the completed reply `r1` to "First?", ready for a second turn. */
+function answered(): LiveState {
+  const state = new LiveState();
+  state.apply(final("one", "First?"));
+  state.apply({ type: "response.started", turnId: "one", responseId: "r1" });
+  state.apply({ type: "response.completed", turnId: "one", responseId: "r1", text: "First answer.", sources: [] });
+  return state;
+}
+
+test("Live: a hold takes the answer on screen, never a draft that is still being written", () => {
+  const state = new LiveState();
+  state.apply(final("t", "Who will check?"));
+  state.apply({ type: "response.started", turnId: "t", responseId: "r" });
+  state.apply({ type: "response.delta", turnId: "t", responseId: "r", text: "I will" });
+  state.holdDisplay();
+  assert.equal(state.readingHeld, false, "nothing readable is on screen, so there is nothing to hold");
+  const shown = answered();
+  shown.apply(final("two", "Second?"));
+  shown.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  shown.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Half" });
+  shown.holdDisplay();
+  assert.equal(shown.display?.id, "r1", "the hold keeps the finished answer, not the draft");
+  shown.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: " done.", primaryDone: true });
+  assert.equal(shown.display?.id, "r1");
+  assert.equal(shown.hasNewerReply, true);
+});
+
+test("Live: continuing a session keeps a reading hold, and starting fresh drops it", () => {
+  const kept = answered();
+  kept.holdDisplay();
+  kept.restart(true);
+  assert.equal(kept.readingHeld, true);
+  assert.equal(kept.display?.id, "r1");
+  const fresh = answered();
+  fresh.holdDisplay();
+  fresh.restart(false);
+  assert.equal(fresh.readingHeld, false);
+  assert.equal(fresh.display, null);
+});
+
+test("Live: without a connection only a reply held back names the answer on screen as an earlier one", () => {
+  const state = answered();
+  state.apply(final("two", "Second?"));
+  state.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  assert.equal(state.showsEarlierAnswer(true), true, "a newer reply is being prepared");
+  assert.equal(state.showsEarlierAnswer(false), false, "a reply that is no longer coming does not count");
+  state.holdDisplay();
+  state.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Second answer.", primaryDone: true });
+  assert.equal(state.showsEarlierAnswer(false), true, "a newer reply waits behind the hold");
+});
+
+test("Live: a held primary line gains its alternative, grounding and sources when its own reply completes", () => {
+  const state = new LiveState();
+  state.apply(final("t", "Who owns the launch?"));
+  state.apply({ type: "response.started", turnId: "t", responseId: "r" });
+  state.apply({ type: "response.delta", turnId: "t", responseId: "r", text: "Alex owns it.", primaryDone: true });
+  state.holdDisplay();
+  state.apply({ type: "response.completed", turnId: "t", responseId: "r", text: "Alex owns it.", grounding: "grounded",
+    sources: [{ title: "Plan", url: "https://example.invalid/plan" }], suggestions: ["Alex owns it.", "I think Alex owns that."] });
+  assert.equal(state.readingHeld, true);
+  assert.equal(state.hasNewerReply, false);
+  assert.equal(state.display?.complete, true);
+  assert.equal(state.display?.grounding, "grounded");
+  assert.deepEqual(state.display?.sources.map(source => source.title), ["Plan"]);
+  assert.deepEqual(answers(state.display), ["Alex owns it.", "I think Alex owns that."]);
+});
+
 test("Live: long speech is translated in bounded chunks without losing words", () => {
   const text = Array.from({ length: 40 }, () => "Copilot helps teams prepare a launch plan.").join(" ");
   const chunks = translationChunks(text);
