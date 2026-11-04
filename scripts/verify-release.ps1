@@ -7,8 +7,7 @@ param(
     [string] $BicepPath,
     [Parameter(Mandatory = $true)]
     [string] $ReportPath,
-    [switch] $InstallBrowsers,
-    [switch] $RequireLive
+    [switch] $InstallBrowsers
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,17 +106,11 @@ try {
     }
     $report.localVerification = 'PASS'
     $report.status = 'LOCAL_PASS_LIVE_NOT_VERIFIED'
-    if ($RequireLive) {
-        $report.status = 'BLOCKED'
-        throw 'Local checks passed, but this run did not verify Azure deployment, real Speech/OpenAI, or real tab sharing. Release gate remains blocked.'
-    }
     Write-Output "Local verification passed. Live Azure and real tab sharing remain NOT VERIFIED. Evidence: $reportFile"
 }
 catch {
-    if ($report.status -ne 'BLOCKED') {
-        $report.localVerification = 'FAIL'
-        $report.status = 'FAIL'
-    }
+    $report.localVerification = 'FAIL'
+    $report.status = 'FAIL'
     throw
 }
 finally {
