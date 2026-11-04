@@ -6,7 +6,7 @@ export interface AudioClip {
   onerror: OnErrorEventHandler;
   play(): Promise<void>; pause(): void; removeAttribute(name: string): void; load(): void;
 }
-export interface ClipState { state: "idle" | "loading" | "playing" | "error"; key: string; message: string }
+interface ClipState { state: "idle" | "loading" | "playing" | "error"; key: string; message: string }
 export class CoachAudio {
   private request: AbortController | undefined;
   private url: string | undefined;

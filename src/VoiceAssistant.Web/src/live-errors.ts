@@ -24,7 +24,7 @@ export type SourceWarning = "muted" | HostAudioWarning;
 /** What the page warns about while capture runs: the source's own condition, or 15 s of near-silence. */
 export type LiveWarning = SourceWarning | "silent";
 /** Where the page runs: inside LiveCoach.exe (WebView2) or a regular browser tab. */
-export type LiveHost = "app" | "browser";
+type LiveHost = "app" | "browser";
 
 type Rule = Pick<Classified, "disposition" | "action">;
 const transient: Rule = { disposition: "transient" };
@@ -32,7 +32,7 @@ const notice: Rule = { disposition: "notice" };
 const refresh: Rule = { disposition: "fatal", action: "restart" };
 
 /** Server `error` codes (see contracts/websocket-v1.md). Unknown codes follow the server's `retryable` flag. */
-export const serverCodes: Readonly<Record<string, Rule>> = {
+const serverCodes: Readonly<Record<string, Rule>> = {
   session_time_limit: { disposition: "rollover" },
   session_superseded: refresh,
   grounding_unavailable: notice,
@@ -60,7 +60,7 @@ export const serverCodes: Readonly<Record<string, Rule>> = {
 };
 
 /** Codes the page itself raises (transport, sign-in, ticket and configuration). */
-export const localCodes: Readonly<Record<string, Rule>> = {
+const localCodes: Readonly<Record<string, Rule>> = {
   connect_timeout: transient,
   handshake_timeout: transient,
   socket_error: transient,

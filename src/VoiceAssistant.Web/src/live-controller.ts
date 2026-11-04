@@ -23,7 +23,7 @@ export interface SourceHooks {
   warning(kind: SourceWarning | null, detail?: string): void;
   stall(frames: number): void;
 }
-export interface LiveControllerDeps {
+interface LiveControllerDeps {
   /** Called from `start()`, which runs inside the user's click, and from `switchSource()`. */
   createSource(kind: CaptureSourceKind, hooks: SourceHooks): AudioSource;
   createTransport(): Transport;
@@ -67,14 +67,14 @@ export const liveLimits = {
   pumpMs: 20,
 } as const;
 
-export type LivePhase = "idle" | "starting" | "connecting" | "live" | "reconnecting" | "stopped";
+type LivePhase = "idle" | "starting" | "connecting" | "live" | "reconnecting" | "stopped";
 
-export const browserClock: LiveClock = {
+const browserClock: LiveClock = {
   now: () => performance.now(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
-export const browserNetwork: LiveNetwork = {
+const browserNetwork: LiveNetwork = {
   online: () => typeof navigator === "undefined" || navigator.onLine !== false,
   onOnline: listener => { addEventListener("online", listener); return () => removeEventListener("online", listener); },
 };

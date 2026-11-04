@@ -9,7 +9,7 @@ export function readOpacity(storage: Pick<Storage, "getItem">): number {
 export function saveOpacity(storage: Pick<Storage, "setItem">, value: number): boolean {
   try { storage.setItem(opacityKey, String(validOpacity(value))); return true; } catch { return false; }
 }
-export interface PictureInPictureApi { requestWindow(options: { width: number; height: number }): Promise<Window> }
+interface PictureInPictureApi { requestWindow(options: { width: number; height: number }): Promise<Window> }
 type SheetName = "settings" | "practice" | "appearance";
 const focusable = 'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],summary,[tabindex="0"]';
 

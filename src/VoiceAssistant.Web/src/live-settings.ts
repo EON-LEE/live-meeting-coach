@@ -4,7 +4,7 @@ import { defaultOptions, isReplyOn, normalizeNotes, notesLimit, type ReplyOn, ty
 import type { ServerEvent } from "./protocol.js";
 
 export type ResponseMode = SessionOptions["responseMode"];
-export type DocumentMode = Exclude<ResponseMode, "conversation">;
+type DocumentMode = Exclude<ResponseMode, "conversation">;
 
 export interface LiveSettings {
   deviceId: string;
@@ -27,7 +27,7 @@ export interface LiveSettings {
 
 /** The English answer text sizes A− and A+ step through, in percent of the default size (100). */
 export const answerSizes = [85, 100, 115, 130, 150] as const;
-export type AnswerSize = typeof answerSizes[number];
+type AnswerSize = typeof answerSizes[number];
 
 function isAnswerSize(value: unknown): value is AnswerSize {
   return (answerSizes as readonly unknown[]).includes(value);

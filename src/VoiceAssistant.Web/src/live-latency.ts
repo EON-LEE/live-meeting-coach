@@ -1,5 +1,5 @@
 /** Reading latency for one reply, in milliseconds from the final transcript it answers. Debug use only; nothing is sent. */
-export interface LatencyRecord {
+interface LatencyRecord {
   turnId: string;
   responseId: string;
   /** Final transcript → the reply's first readable line on screen (the primary line, or the completed reply). */

@@ -1,18 +1,18 @@
 export type CoachKind = "question" | "reply";
 export type Voice = "coach" | "partner";
 export type Rate = "normal" | "slow" | "fast";
-export interface Chunk { en: string; ko: string }
+interface Chunk { en: string; ko: string }
 export interface Enrichment { korean: string; pronunciation: Chunk[] | null }
-export interface Scenario { kind: "sales" | "interview" | "presentation" | "custom"; description: string; difficulty: number }
+interface Scenario { kind: "sales" | "interview" | "presentation" | "custom"; description: string; difficulty: number }
 export interface HistoryEntry { role: "partner" | "user"; text: string }
 export interface PracticeSettings { scenario: Scenario; topic: string; useMaterials: boolean; maxTurns: number }
-export type Grounding = "disabled" | "grounded" | "no_matches" | "unavailable";
+type Grounding = "disabled" | "grounded" | "no_matches" | "unavailable";
 export interface PracticeLine { text: string; grounding: Grounding; sources: { title: string }[] }
 export interface PartnerTurn extends PracticeLine { done: boolean; turn: number }
 export interface Feedback { correctedEnglish: string; easierEnglish: string; feedbackKo: string; points: { tag: string; ko: string }[]; clarity: number }
 export interface PracticeAnswer { question: string; answer: string; correctedEnglish?: string }
 export interface PracticeSummary { headlineKo: string; strengthsKo: string[]; improveKo: string[]; phrases: Chunk[] }
-export type CoachFetch = (path: string, init: RequestInit) => Promise<Response>;
+type CoachFetch = (path: string, init: RequestInit) => Promise<Response>;
 
 export class CoachError extends Error {
   constructor(readonly code: string, readonly retryAfter = 0) {
@@ -44,7 +44,7 @@ function choice<T extends string>(value: unknown, values: readonly T[]): T {
   if (typeof value !== "string" || !values.includes(value as T)) throw new CoachError("invalid_response"); return value as T;
 }
 function array(value: unknown, max: number): unknown[] { if (!Array.isArray(value) || value.length > max) throw new CoachError("invalid_response"); return value; }
-export function normalizeWords(value: string): string { return value.trim().replace(/\s+/g, " "); }
+function normalizeWords(value: string): string { return value.trim().replace(/\s+/g, " "); }
 function english(value: unknown, maxWords: number, question = false): string {
   const s = text(value, 1, 800);
   if (s !== normalizeWords(s) || !/[A-Za-z]/.test(s) || /[^A-Za-z0-9 .,?!':()\-]/u.test(s) ||

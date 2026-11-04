@@ -1,7 +1,7 @@
 import { CoachClient, CoachError, validateSettings, type PracticeSettings, type HistoryEntry,
   type PartnerTurn, type Feedback, type PracticeAnswer, type PracticeSummary, type PracticeLine } from "./coach-client.js";
 
-export type PracticePhase = "idle" | "connecting" | "question" | "answering" | "feedback" | "summary" | "busy" | "error";
+type PracticePhase = "idle" | "connecting" | "question" | "answering" | "feedback" | "summary" | "busy" | "error";
 export interface PracticeView {
   phase: PracticePhase; question: PartnerTurn | null; answer: string; partial: string;
   feedback: Feedback | null; summary: PracticeSummary | null; hint: PracticeLine | null; error: string;
