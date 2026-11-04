@@ -17,8 +17,12 @@ internal sealed class ScriptedSocket : WebSocket
     private readonly Channel<JsonElement> sent = Channel.CreateUnbounded<JsonElement>();
     private WebSocketState state = WebSocketState.Open;
     private volatile bool holdSends;
+    private readonly TaskCompletionSource sendHeld = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public ConcurrentQueue<JsonElement> Sent { get; } = new();
+
+    /// <summary>Completes when a send first starts waiting under <see cref="HoldSends"/>.</summary>
+    public Task SendHeld => sendHeld.Task;
 
     public void Client(string text) => incoming.Writer.TryWrite((Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text));
 
@@ -62,6 +66,7 @@ internal sealed class ScriptedSocket : WebSocket
     {
         if (holdSends)
         {
+            sendHeld.TrySetResult();
             try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
             finally { holdSends = false; }
         }

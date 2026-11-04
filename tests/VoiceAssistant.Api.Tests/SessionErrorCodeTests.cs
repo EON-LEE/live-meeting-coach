@@ -42,8 +42,11 @@ public sealed class SessionErrorCodeTests
         Assert.Equal("session.ready", Type(await socket.NextAsync()));
 
         // The event loop waits on its first send while recognition keeps producing: the bounded queue (64) overflows.
+        // Wait until that send is held: otherwise the overflow can come first and the error itself would be the held send.
         socket.HoldSends();
-        for (var revision = 1; revision <= 80; revision++) provider.Emit(new("turn", revision, "We are still talking", false));
+        provider.Emit(new("turn", 1, "We are still talking", false));
+        await socket.SendHeld.WaitAsync(TimeSpan.FromSeconds(10));
+        for (var revision = 2; revision <= 80; revision++) provider.Emit(new("turn", revision, "We are still talking", false));
         await run.WaitAsync(TimeSpan.FromSeconds(10));
 
         var error = Assert.Single(socket.Sent, message => Type(message) == "error");
