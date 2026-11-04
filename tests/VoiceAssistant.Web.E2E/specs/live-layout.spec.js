@@ -63,7 +63,7 @@ async function fixture(page, native, expanded = true, settings = everything) {
   }, { english, korean, token, expanded });
 }
 
-async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, settings = everything } = {}) {
+async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, feedback = false, settings = everything } = {}) {
   const commands = [];
   const translations = [];
   await page.route('**/api/client-config', route => route.fulfill({
@@ -96,7 +96,7 @@ async function meetingFixture(page, { replyKorean = false, sessionUpdate = false
         effective = { responseMode: command.options.responseMode, replyKorean: command.options.replyKorean === true,
           replyOn: command.options.replyOn ?? 'all', notes: command.options.notes ?? '' };
         ws.send(JSON.stringify({ type: 'session.ready', ...(replyKorean ? { protocolVersion: 1, replyKorean: true } : {}),
-          ...(sessionUpdate ? { sessionUpdate: true } : {}) }));
+          ...(sessionUpdate ? { sessionUpdate: true } : {}), ...(feedback ? { feedback: true } : {}) }));
       }
       if (command.type === 'session.update' && sessionUpdate) {
         effective = { ...effective, ...command.options };
@@ -275,6 +275,59 @@ test('Korean that the server never pushes is translated by the client after a sh
   await expect(page.locator('#answer-korean')).toHaveText('뜻: We should check the plan.', { timeout: 10_000 });
   await expect(page.locator('#alternative-korean')).toHaveText('뜻: Could we check that together?');
   expect(replyRequests(ws).map(item => item.text).sort()).toEqual(['Could we check that together?', 'We should check the plan.']);
+});
+
+test('one-tap feedback sits quietly under the answers: only with a reply and a server that accepts it, each reason once', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 400 });
+  const ws = await meetingFixture(page, { feedback: true });
+  const row = page.locator('#feedback'), good = row.getByRole('button', { name: '좋아요' }), late = row.getByRole('button', { name: '늦음' });
+  const sent = () => ws.commands.filter(command => command.type === 'response.feedback');
+  await expect(row).toBeHidden();
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await expect(row).toBeVisible();
+  await expect(page.locator('#feedback-reasons')).toBeHidden();
+  // Below both answers, text-only buttons, smaller than every answer line.
+  expect(await page.evaluate(() => document.querySelector('#alternative-card').nextElementSibling === document.querySelector('#feedback'))).toBe(true);
+  expect(await row.locator('button').evaluateAll(buttons => buttons.every(button => button.children.length === 0))).toBe(true);
+  const size = selector => page.locator(selector).evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+  expect(await size('#feedback-more')).toBeLessThan(await size('#answer-korean'));
+  await good.scrollIntoViewIfNeeded();
+  await good.click();
+  await expect(good).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#feedback-note')).toHaveText('보냈어요 · 고마워요');
+  await good.click();
+  // The reasons open from the keyboard too, and the chosen one stays pressed.
+  await page.locator('#feedback-more').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#feedback-more')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#feedback-reasons')).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(late).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(late).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(sent).toEqual([{ type: 'response.feedback', responseId: 'r1', reason: 'good' },
+    { type: 'response.feedback', responseId: 'r1', reason: 'late' }]);
+  expect(await page.evaluate(() => [...document.querySelectorAll('.live-answers, #feedback')]
+    .filter(el => el.scrollWidth > el.clientWidth + 1).length + Number(document.documentElement.scrollWidth > innerWidth + 1))).toBe(0);
+  // The next reply starts closed and unpressed.
+  reply(ws, 2, 'And the risks?', 'The main risk is the data migration.');
+  await expect(page.locator('#answer-text')).toHaveText('The main risk is the data migration.');
+  await expect(good).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#feedback-reasons')).toBeHidden();
+  await expect(page.locator('#feedback-note')).toHaveText('');
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(row).toBeHidden();
+  expect(sent()).toHaveLength(2);
+});
+
+test('a server that does not announce feedback never gets the row or the command', async ({ page }) => {
+  const ws = await meetingFixture(page);
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await expect(page.locator('#feedback')).toBeHidden();
+  expect(ws.commands.some(command => command.type === 'response.feedback')).toBe(false);
 });
 
 test('a server that does not announce the push gets no waiting: the client translates the reply at once', async ({ page }) => {

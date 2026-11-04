@@ -462,6 +462,26 @@ test("The reply choice and the notes reach every session.start and a running ses
     [["questions", "Prefer plan B."], ["all", "Do not commit before the third quarter."]]);
 });
 
+test("One-tap feedback goes only to a ready server that announced it, since an older one ends the session on it", async () => {
+  const h = harness();
+  assert.equal(h.controller.feedback("r1", "good"), false, "not connected");
+  await live(h);
+  assert.equal(h.controller.canFeedback, false);
+  assert.equal(h.controller.feedback("r1", "good"), false);
+  assert.equal(h.latest().types.includes("response.feedback"), false);
+  h.latest().onError(new CodedError("socket_closed", "dropped"));
+  assert.equal(h.controller.canFeedback, false, "the capability ends with its connection");
+  h.clock.advance(3000); await flush();
+  h.latest().ready({ feedback: true });
+  assert.equal(h.controller.canFeedback, true);
+  assert.equal(h.controller.feedback("r1", "hard_to_read"), true);
+  assert.deepEqual(h.latest().sent.at(-1), { type: "response.feedback", responseId: "r1", reason: "hard_to_read" });
+  assert.throws(() => h.controller.feedback("r1", "slow" as never), /reason/);
+  h.controller.stop();
+  assert.equal(h.controller.canFeedback, false);
+  assert.equal(h.controller.feedback("r1", "late"), false);
+});
+
 test("A stop in the middle of a reply ends that reply, so nothing looks as if it were still being generated", async () => withMediaStream(async () => {
   const media = displayMedia(), state = new LiveState();
   const h = harness(() => media.create(), { onEvent: event => state.apply(event), onDisconnect: () => state.endReply() });

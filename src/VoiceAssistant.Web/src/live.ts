@@ -21,6 +21,7 @@ import { LatencyMarks, debugEnabled } from "./live-latency.js";
 import { createMenu } from "./live-menu.js";
 import { createSettingsDialog } from "./live-settings-dialog.js";
 import { createFloat } from "./live-float.js";
+import { createFeedback } from "./live-feedback.js";
 import { $, liveDocument, setData, setHidden, setPressed, setText, setTitle, write } from "./live-dom.js";
 
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
@@ -512,6 +513,7 @@ function renderSuggestions(): void {
   }
   setHidden("alternative-card", values.length < 2);
   setText("alternative-text", values[1] ?? "");
+  feedback.render(display?.id, controller.canFeedback);
   const generating = controller.isReady && state.generating;
   const finishing = !!display && generating && state.current?.id === display.id;
   const previous = state.showsEarlierAnswer(controller.isReady);
@@ -547,6 +549,8 @@ function toggleReadingHold(): void {
   render();
 }
 $("hold-answer").addEventListener("click", toggleReadingHold);
+
+const feedback = createFeedback({ root: $("feedback"), send: (id, reason) => controller.feedback(id, reason) });
 
 // ---------- Session controls: header buttons and the right-click menu ----------
 

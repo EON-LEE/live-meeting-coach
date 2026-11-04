@@ -148,6 +148,20 @@ html, body.live-body { margin: 0; min-height: 100%; }
 .live-answers[data-previous="true"] .live-card.primary { border-left-color: #5d7394; }
 .live-answers[data-previous="true"] .live-english, .live-answers[data-previous="true"] .live-rest,
 .live-answers[data-previous="true"] .live-meaning p { color: #94a5bd; }
+/* One-tap feedback sits under the answers, small and quiet, so it never competes with the text to read; the chips keep a dark
+   backing for the see-through window. */
+.live-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 10px; }
+.live-feedback[hidden], .live-feedback-reasons[hidden] { display: none; }
+.live-feedback-reasons { display: contents; }
+.live-feedback button {
+  font: inherit; font-size: 12px; line-height: 1.4; min-height: 24px; padding: 2px 9px; border: 1px solid #3e5068; border-radius: 999px;
+  background: rgba(13, 21, 34, .9); color: #b4c3d8; cursor: pointer; touch-action: manipulation; white-space: nowrap;
+}
+.live-feedback button:hover { color: #edf2fa; border-color: #5d7394; }
+.live-feedback button[aria-pressed="true"], .live-feedback button[aria-expanded="true"] { color: #edf2fa; background: #1f3047; border-color: #8fa6c4; }
+.live-feedback button[aria-pressed="true"]::before { content: "✓ "; content: "✓ " / ""; }
+.live-feedback button:focus-visible { outline: 2px solid #a9c9ff; outline-offset: 2px; }
+.live-feedback-note { font-size: 11px; color: #9eb2ce; text-shadow: 0 0 2px #000, 0 1px 3px rgba(0, 0, 0, .9); }
 .live-continuity { margin: 12px 0 0; font-size: 10px; color: #9baec9; white-space: pre-line; }
 .live-details { border-top: 1px solid #3a4a60; padding-top: 12px; }
 .live-details summary { width: fit-content; color: #c1cfe2; font-size: 12px; cursor: pointer; touch-action: manipulation; }

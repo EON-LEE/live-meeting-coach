@@ -70,6 +70,19 @@
               <p id="alternative-korean" lang="ko"></p>
             </div>
           </article>
+          <div id="feedback" class="live-feedback" role="group" aria-label="추천 피드백" hidden>
+            <button type="button" data-reason="good" aria-pressed="false">좋아요</button>
+            <button id="feedback-more" type="button" aria-expanded="false" aria-controls="feedback-reasons">아쉬워요</button>
+            <span id="feedback-reasons" class="live-feedback-reasons" hidden>
+              <button type="button" data-reason="late" aria-pressed="false">늦음</button>
+              <button type="button" data-reason="wrong" aria-pressed="false">틀림</button>
+              <button type="button" data-reason="thin" aria-pressed="false">부족</button>
+              <button type="button" data-reason="hard_to_read" aria-pressed="false">읽기 어려움</button>
+              <button type="button" data-reason="unnecessary" aria-pressed="false">불필요</button>
+              <button type="button" data-reason="missing" aria-pressed="false">필요한 답 없음</button>
+            </span>
+            <span id="feedback-note" class="live-feedback-note" aria-live="polite"></span>
+          </div>
           <p class="live-grounding"><span id="grounding-badge" class="live-badge" role="status">근거 상태 대기</span></p>
           <details id="live-details" class="live-details">
             <summary id="details-summary">상세 근거</summary>

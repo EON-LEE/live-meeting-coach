@@ -136,6 +136,14 @@ test("Live: session.ready reports the settings-update capability only when the s
     assert.throws(() => parseEvent(JSON.stringify({ type: "session.ready", sessionUpdate: bad })), /sessionUpdate/);
 });
 
+test("Live: session.ready reports the one-tap feedback capability only when the server set it to true", () => {
+  const ready = (extra: object) => parseEvent(JSON.stringify({ type: "session.ready", protocolVersion: 1, ...extra }));
+  assert.deepEqual(ready({ feedback: true }), { type: "session.ready", feedback: true });
+  assert.deepEqual(ready({ feedback: false }), { type: "session.ready" });
+  assert.deepEqual(ready({}), { type: "session.ready" }, "an older server leaves it out");
+  for (const bad of ["true", 1, null]) assert.throws(() => ready({ feedback: bad }), /feedback/);
+});
+
 test("Live: session.ready says how many turns the server resumed, as a whole count", () => {
   assert.deepEqual(parseEvent(JSON.stringify({ type: "session.ready", protocolVersion: 1, sessionUpdate: true, resumedTurns: 3 })),
     { type: "session.ready", sessionUpdate: true, resumedTurns: 3 });

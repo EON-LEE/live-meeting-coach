@@ -20,6 +20,8 @@ export interface ServerEvent {
   replyKorean?: boolean;
   /** `session.ready`: this server accepts `session.update` (document search, Korean, `replyOn` and notes can change while running). */
   sessionUpdate?: boolean;
+  /** `session.ready`: this server accepts one-tap feedback on a reply (`response.feedback`). Older servers omit it. */
+  feedback?: boolean;
   /** `session.ready`: how many finalized turns of the previous connection the server continued with (`resumeConversation`). */
   resumedTurns?: number;
   /** `session.updated`: the effective document-search mode. */
@@ -60,9 +62,11 @@ export function parseEvent(data: unknown): ServerEvent {
   if (type === "session.ready") {
     if (e.replyKorean !== undefined && typeof e.replyKorean !== "boolean") throw new Error("Invalid replyKorean flag.");
     if (e.sessionUpdate !== undefined && typeof e.sessionUpdate !== "boolean") throw new Error("Invalid sessionUpdate flag.");
+    if (e.feedback !== undefined && typeof e.feedback !== "boolean") throw new Error("Invalid feedback flag.");
     if (e.resumedTurns !== undefined && (!Number.isSafeInteger(e.resumedTurns) || (e.resumedTurns as number) < 0))
       throw new Error("Invalid resumedTurns count.");
     return { type, ...(e.replyKorean === true ? { replyKorean: true } : {}), ...(e.sessionUpdate === true ? { sessionUpdate: true } : {}),
+      ...(e.feedback === true ? { feedback: true } : {}),
       ...(e.resumedTurns === undefined ? {} : { resumedTurns: e.resumedTurns as number }) };
   }
   if (type === "session.updated") {

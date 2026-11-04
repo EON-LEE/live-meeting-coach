@@ -1,6 +1,7 @@
 import { isHostSource, type AudioSource, type CaptureSourceKind } from "./capture.js";
 import { audioFrameBytes } from "./audio-limits.js";
 import { CodedError } from "./errors.js";
+import { validateFeedback, type FeedbackReason } from "./feedback.js";
 import { classifyError, classifyServerError, type Classified, type LiveWarning, type SourceWarning } from "./live-errors.js";
 import { createStartMessage, validateUpdate, type SessionOptions, type SessionUpdate } from "./options.js";
 import type { ServerEvent } from "./protocol.js";
@@ -141,6 +142,8 @@ export class LiveController {
   private connection: AbortController | undefined;
   private generation = 0;
   private ready = false;
+  /** The ready connection's server accepts `response.feedback`. */
+  private feedbackOn = false;
   private readyAt: number | undefined;
   /**
    * A connection of this live session was ready before, so the next one reconnects or rolls over the same conversation and
@@ -174,6 +177,8 @@ export class LiveController {
     return this.phase === "starting" || this.phase === "connecting" || this.phase === "live" || this.phase === "reconnecting";
   }
   get isReady(): boolean { return this.ready; }
+  /** One-tap feedback can be sent: the connection is ready and its server announced `feedback`. */
+  get canFeedback(): boolean { return this.ready && this.feedbackOn; }
   /** The picker or permission prompt is done and audio is being captured. */
   get isCapturing(): boolean { return this.capturing; }
   /** The connection waits for an interactive sign-in; `resume()` continues with the same audio. */
@@ -295,6 +300,17 @@ export class LiveController {
     this.command({ type: "session.update", options });
   }
 
+  /**
+   * One-tap feedback on a reply, only to a server whose `session.ready` said `feedback`: an older server ends the session on a
+   * command it does not know. Returns whether it was sent.
+   */
+  feedback(responseId: string, reason: FeedbackReason): boolean {
+    const command = validateFeedback(responseId, reason);
+    if (!this.canFeedback) return false;
+    this.command(command);
+    return true;
+  }
+
   private command(message: object): void {
     const transport = this.transport;
     if (!this.ready || !transport) return;
@@ -367,7 +383,7 @@ export class LiveController {
     catch { this.halt({ code: "invalid_options", disposition: "fatal", action: "restart" }); return; }
     const transport = this.transport = this.deps.createTransport();
     const connection = this.connection = new AbortController();
-    this.ready = false;
+    this.ready = this.feedbackOn = false;
     this.closing = undefined;
     if (this.phase !== "reconnecting") this.setPhase("connecting");
     transport.connect(event => this.receive(generation, event), error => this.lost(generation, error), connection.signal).then(() => {
@@ -394,6 +410,7 @@ export class LiveController {
       }
       this.clearTimer("handshake");
       this.ready = this.resumable = true;
+      this.feedbackOn = event.feedback === true;
       this.readyAt = this.refilledAt = this.lastSentAt = this.clock.now();
       this.tokens = liveLimits.burstBytes;
       this.offline = this.rollingOver = false;
