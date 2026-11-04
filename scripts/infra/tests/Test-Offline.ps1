@@ -392,6 +392,6 @@ try {
 } finally {
     foreach ($file in $temporary) { Remove-Item -LiteralPath $file -Force }
 }
-& (Join-Path $PSScriptRoot 'Test-Readiness.ps1')
+& (Join-Path $PSScriptRoot 'Test-AzureProcess.ps1')
 & (Join-Path $PSScriptRoot 'Test-PrivateIngestion.ps1') -BicepPath $BicepPath
 & (Join-Path $PSScriptRoot 'Test-SemanticIndex.ps1')
