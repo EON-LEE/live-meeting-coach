@@ -23,7 +23,9 @@ public sealed class SessionSlots
         }
         // A reconnect after a network drop can arrive before the old socket notices the drop. The old session's teardown is
         // bounded (MeetingSession.ShutdownBudget), so it releases the slot well within this wait even when its cleanup hangs.
-        previous.Supersede.Cancel();
+        // That session may also have released the slot (and disposed its token source) since the lookup above.
+        try { previous.Supersede.Cancel(); }
+        catch (ObjectDisposedException) { }
         try { await previous.Released.Task.WaitAsync(SupersedeWait, cancellation); }
         catch (TimeoutException) { return null; }
         lock (active)
