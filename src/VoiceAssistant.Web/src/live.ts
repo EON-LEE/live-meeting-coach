@@ -19,13 +19,13 @@ import { actionLabels, captureMessage, liveHost, liveMessage, reconnectText, sou
   type PageAction } from "./live-errors.js";
 import { LatencyMarks, debugEnabled } from "./live-latency.js";
 import { createMenu } from "./live-menu.js";
-import { $, liveDocument, returnFocus, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
+import { createSettingsDialog } from "./live-settings-dialog.js";
+import { $, liveDocument, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
   write } from "./live-dom.js";
 
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
 const toggleButton = $<HTMLButtonElement>("live-toggle"), pauseButton = $<HTMLButtonElement>("live-pause");
 const smallerButton = $<HTMLButtonElement>("answer-smaller"), largerButton = $<HTMLButtonElement>("answer-larger");
-const settingsDialog = $<HTMLDialogElement>("settings");
 const micDevice = $<HTMLSelectElement>("mic-device"), responseMode = $<HTMLSelectElement>("response-mode");
 const topic = $<HTMLInputElement>("topic"), notesField = $<HTMLTextAreaElement>("my-notes");
 const audioSource = $<HTMLSelectElement>("audio-source");
@@ -129,7 +129,7 @@ $("reply-all").addEventListener("click", () => changeSettings({ ...settings, rep
 $("reply-questions").addEventListener("click", () => changeSettings({ ...settings, replyOn: "questions" }));
 $("toggle-captions").addEventListener("click", () => changeSettings({ ...settings, showCaptions: !settings.showCaptions }));
 $("toggle-korean").addEventListener("click", () => changeSettings({ ...settings, showKorean: !settings.showKorean }));
-$("notes-chip").addEventListener("click", () => openSettings(notesField));
+$("notes-chip").addEventListener("click", () => settingsDialog.open(notesField));
 responseMode.addEventListener("change", () => changeSettings(withResponseMode(settings, responseMode.value as ResponseMode)));
 
 /** A− / A+ step the English answer size. At the smallest or largest size the pressed button turns off, so focus moves to the other. */
@@ -215,7 +215,7 @@ function createSource(kind: CaptureSourceKind, hooks: SourceHooks): AudioSource 
     },
     devices: navigator.mediaDevices,
     deviceId: settings.deviceId || undefined,
-    onDevices: fillDevices,
+    onDevices: devices => settingsDialog.fillDevices(devices),
   });
 }
 
@@ -573,7 +573,7 @@ function renderControls(): void {
 }
 /** What a menu item or a header button does. Start runs inside the click, so a share picker may open. */
 function runAction(action: string): void {
-  if (action === "settings") openSettings();
+  if (action === "settings") settingsDialog.open();
   if (action === "start") startLive();
   if (action === "stop") void stopLive();
   if (action === "pause") { paused = !paused; state.pause(paused); controller.pause(paused); render(); }
@@ -590,42 +590,9 @@ const liveMenu = createMenu({ panel, menu, refresh: renderControls, run: runActi
 
 // ---------- Settings dialog ----------
 
-function fillDevices(devices: MediaDeviceInfo[]): void {
-  const selected = settings.deviceId;
-  micDevice.replaceChildren(new Option("브라우저 기본 마이크", ""));
-  for (const device of devices.filter(value => value.kind === "audioinput"))
-    micDevice.add(new Option(device.label || "마이크", device.deviceId));
-  micDevice.value = [...micDevice.options].some(option => option.value === selected) ? selected : "";
-}
-function renderAccount(): void {
-  const label = auth.isDemo ? "로그인" : "Microsoft 계정 연결";
-  $("account-status").textContent = auth.isFake ? "로컬 테스트 서버 (로그인 불필요)"
-    : auth.signedIn ? `로그인됨: ${auth.accountName} · 이 브라우저에서 로그인이 유지됩니다`
-    : auth.isDemo ? "아직 로그인하지 않았습니다." : "Microsoft 계정이 아직 연결되지 않았습니다.";
-  $("signin").hidden = auth.isFake;
-  $("signin").textContent = auth.signedIn ? (auth.isDemo ? "다시 로그인" : "다른 계정으로 연결") : label;
-}
-/** The element the settings dialog was opened from; focus returns to it when the dialog closes. */
-let settingsOpener: Element | null = null;
-/** Opens the settings dialog, with focus on `field` when one is given (the "내 메모" chip opens the notes). */
-function openSettings(field?: HTMLElement): void {
-  settingsOpener = panel.ownerDocument.activeElement;
-  if (pipWindow) window.focus();
-  renderAccount();
-  void navigator.mediaDevices?.enumerateDevices().then(fillDevices).catch(() => undefined);
-  settingsDialog.showModal();
-  field?.focus();
-}
-$("signin").addEventListener("click", () => {
-  void auth.signIn().then(renderAccount, error => { $("account-status").textContent = `로그인 실패: ${asError(error).message}`; });
-});
-settingsDialog.addEventListener("close", () => {
-  saveSettings(); syncSession(); render();
-  // The browser has already put focus back where the dialog was opened from. The close event comes a task later, when focus
-  // may have moved on: only focus left nowhere or in the closed dialog (its opener is gone or turned off) goes to the opener
-  // or the panel.
-  const focused = panel.ownerDocument.activeElement;
-  if (!focused || focused === panel.ownerDocument.body || settingsDialog.contains(focused)) returnFocus(panel, settingsOpener);
+const settingsDialog = createSettingsDialog({
+  panel, dialog: $<HTMLDialogElement>("settings"), micDevice, auth, deviceId: () => settings.deviceId, floating: () => !!pipWindow,
+  closed: () => { saveSettings(); syncSession(); render(); },
 });
 
 // ---------- Always-on-top floating window (Document Picture-in-Picture, Edge/Chrome) ----------
