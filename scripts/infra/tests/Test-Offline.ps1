@@ -155,6 +155,16 @@ try {
     Assert-True ($diagnostic.condition -eq "[parameters('enableDiagnostics')]" -and $diagnostic.scope -match 'managedEnvironments' -and
         ($diagnostic.properties.logs.category -join ',') -ceq 'ContainerAppConsoleLogs,ContainerAppSystemLogs' -and
         -not $diagnostic.properties.PSObject.Properties['metrics']) 'Only console/system log categories export; no request diagnostics'
+    $workbookModule = @($template.resources | Where-Object { $_.type -eq 'Microsoft.Resources/deployments' -and
+        @($_.properties.template.resources | Where-Object type -EQ 'Microsoft.Insights/workbooks').Count -eq 1 })
+    $workbookTemplate = if ($workbookModule.Count -eq 1) { $workbookModule[0].properties.template } else { $null }
+    $workbook = if ($workbookTemplate) { @($workbookTemplate.resources | Where-Object type -EQ 'Microsoft.Insights/workbooks')[0] } else { $null }
+    Assert-True ($null -ne $workbook -and $template.parameters.deployWorkbook.defaultValue -eq $true -and
+        $workbookModule[0].condition -match "parameters\('enableDiagnostics'\)" -and $workbookModule[0].condition -match "parameters\('deployWorkbook'\)" -and
+        $workbookModule[0].properties.parameters.appInsightsId.value -match 'Microsoft\.Insights/components' -and
+        $workbookModule[0].properties.parameters.logAnalyticsWorkspaceId.value -match 'Microsoft\.OperationalInsights/workspaces' -and
+        $workbook.properties.sourceId -eq "[toLower(parameters('appInsightsId'))]" -and
+        ($workbookTemplate | ConvertTo-Json -Depth 50) -notmatch '/subscriptions/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-') 'The optional workbook reads the diagnostics Application Insights and workspace, with no fixed resource IDs'
     Assert-True ((@($env | Where-Object name -EQ 'Logging__LogLevel__Microsoft.AspNetCore')[0].value -eq 'Warning')) 'Request logging stays at Warning so URLs with one-use tickets are never logged'
     $publisher = @($template.resources | Where-Object { $_.type -eq 'Microsoft.Authorization/roleAssignments' -and
         $_.properties.roleDefinitionId -eq "[variables('metricsPublisherRole')]" })
