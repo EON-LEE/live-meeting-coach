@@ -26,11 +26,24 @@ Requires the Microsoft Edge WebView2 Runtime (installed with current Edge).
 
 ```powershell
 dotnet publish .\src\VoiceAssistant.WebOverlay -c Release -r win-x64 --self-contained true -o <output folder>
-<output folder>\LiveCoach.exe                       # production page
+<output folder>\LiveCoach.exe --url https://<your-app>.<region>.azurecontainerapps.io/live.html   # your deployment
 <output folder>\LiveCoach.exe --url http://127.0.0.1:5173/live.html --fake-mic   # local Fake API + Vite test
 ```
 
-`--url` accepts HTTPS, or HTTP on loopback only. `--fake-mic` is for local testing: it uses Chromium's synthetic
+## Page address
+
+The repository contains no deployment address. LiveCoach uses the first of these that is set:
+
+1. `--url <address>` on the command line.
+2. The `LIVECOACH_URL` environment variable.
+3. `LiveCoach.settings.json` next to `LiveCoach.exe`: `{"url": "https://<your-app>.<region>.azurecontainerapps.io/live.html"}`.
+4. A build-time default: copy `LiveCoach.local.props.example` to `LiveCoach.local.props` (git-ignored) in this folder
+   and set `LiveCoachDefaultUrl`, or pass `-p:LiveCoachDefaultUrl=<address>` to `dotnet build`/`dotnet publish`.
+
+The address must be HTTPS, or HTTP on loopback for local development, without user information. If the first setting
+found is invalid, LiveCoach shows the problem instead of trying the next one. With no address, it shows these steps.
+
+`--fake-mic` is for local testing: it uses Chromium's synthetic
 microphone, enables DevTools and opens a loopback CDP port 9333 so
 `tests/VoiceAssistant.Web.E2E/verify-overlay-app.mjs` can drive the hosted page. Never use it in a real meeting.
 
@@ -100,7 +113,8 @@ Dev-only mechanism check (plays quiet tones from child processes, then deletes t
 
 ## Real meeting-audio test
 
-`--fake-mic --audio-file <16 kHz mono .wav>` feeds a recording into the page's microphone once (no loop).
+`--fake-mic --audio-file <16 kHz mono .wav>` (with the page address set as above) feeds a recording into the page's
+microphone once (no loop).
 `tests/VoiceAssistant.Web.E2E/real-meeting-audio.mjs <outDir> <seconds>` then starts live (demo login if asked),
 records the overlay every second and writes `real-meeting-report.json` plus a final screenshot.
 

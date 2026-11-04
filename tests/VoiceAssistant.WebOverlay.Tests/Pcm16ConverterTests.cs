@@ -2,9 +2,9 @@ using System.Buffers.Binary;
 using NAudio.Wave;
 using VoiceAssistant.Audio;
 
-namespace VoiceAssistant.Desktop.Tests;
+namespace VoiceAssistant.WebOverlay.Tests;
 
-public sealed class AudioTests
+public sealed class Pcm16ConverterTests
 {
     [Theory]
     [InlineData(16000)]

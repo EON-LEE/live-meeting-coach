@@ -4,7 +4,6 @@ updates:
     directories:
       - "/src/*"
       - "/tests/*"
-      - "/tools/*"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -14,7 +13,6 @@ updates:
         patterns:
           - "Microsoft.NET.Test.Sdk"
           - "xunit*"
-          - "coverlet*"
       nuget-minor-and-patch:
         update-types: [minor, patch]
     # NAudio 3 splits the packages, requires .NET 9+ and changes custom provider Read signatures. Moving the Teams
@@ -38,7 +36,6 @@ updates:
   - package-ecosystem: docker
     directories:
       - "/src/VoiceAssistant.Api"
-      - "/tools/VoiceAssistant.LiveProbe"
       - "/infra/private-ingestion"
     schedule:
       interval: weekly

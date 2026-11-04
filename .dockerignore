@@ -11,5 +11,5 @@
 **/.compiled
 **/.env
 **/.env.*
-*.zip
-*.png
+**/*.zip
+**/*.png

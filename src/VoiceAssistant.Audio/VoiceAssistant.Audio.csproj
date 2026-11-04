@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Audio conversion shared by the native desktop client and the LiveCoach WebView2 host. -->
+  <!-- Audio conversion used by the LiveCoach WebView2 host. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
