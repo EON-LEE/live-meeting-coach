@@ -546,7 +546,6 @@ function renderSuggestions(): void {
   hold.disabled = holdView.disabled;
   setPressed("hold-answer", holdView.pressed);
   write(hold, holdView.label);
-  setText("continuity", "추천은 실제로 말한 내용이 아닙니다. 화면 고정은 오디오 전송을 중지하지 않습니다.");
   const badge = $("grounding-badge");
   if (badge.dataset.grounding !== (display?.grounding ?? "")) badge.dataset.grounding = display?.grounding ?? "";
   write(badge, groundingBadge(display?.grounding, reading));
