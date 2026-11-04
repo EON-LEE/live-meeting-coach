@@ -1,4 +1,5 @@
 import type { Grounding, ServerEvent, Source } from "./protocol.js";
+import { ReadingHold } from "./reading-hold.js";
 
 export interface LiveTurn { id: string; revision: number; text: string; final: boolean }
 export interface LiveReply {
@@ -76,16 +77,15 @@ export class LiveState {
   private latestTurn: string | undefined;
   private suppressedTurn: string | undefined;
   private suppressAll = false;
-  private heldReply: LiveReply | null = null;
-  private shownReply: LiveReply | null = null;
+  private readonly reading = new ReadingHold<LiveReply>();
   /** A `response_filtered` error arrived: the `response.cancelled` that follows withdraws its reply, wherever it is shown. */
   private withdrawing = false;
 
   /** The newest readable reply: a finished primary line or a completed reply. */
-  get shown(): LiveReply | null { return this.shownReply; }
-  get display(): LiveReply | null { return this.heldReply ?? this.shownReply; }
-  get readingHeld(): boolean { return this.heldReply !== null; }
-  get hasNewerReply(): boolean { return !!this.heldReply && !!this.shownReply && this.heldReply.id !== this.shownReply.id; }
+  get shown(): LiveReply | null { return this.reading.shown; }
+  get display(): LiveReply | null { return this.reading.display; }
+  get readingHeld(): boolean { return this.reading.isHeld; }
+  get hasNewerReply(): boolean { return this.reading.hasNewer; }
   get latest(): LiveTurn | undefined { return this.turns.at(-1); }
   /** A newer reply is being produced. With gathered replies, not every final gets its own reply. */
   get generating(): boolean { return !!this.current && !this.current.complete; }
@@ -102,13 +102,10 @@ export class LiveState {
     this.turns = []; this.current = null; this.lastCompleted = null; this.error = "";
     this.seen.clear(); this.order = []; this.latestTurn = undefined;
     this.suppressedTurn = undefined; this.suppressAll = false;
-    this.heldReply = null; this.shownReply = null; this.withdrawing = false;
+    this.reading.reset(); this.withdrawing = false;
   }
-  holdDisplay(): void {
-    const display = this.display;
-    if (display && (display.complete || display.primaryDone)) this.heldReply = display;
-  }
-  releaseDisplay(): void { this.heldReply = null; }
+  holdDisplay(): void { this.reading.hold(); }
+  releaseDisplay(): void { this.reading.release(); }
   pause(value: boolean): void {
     this.suppressAll = value;
     if (value) this.cancelCurrent(); else this.suppressedTurn = undefined;
@@ -142,16 +139,11 @@ export class LiveState {
     if (current && !current.complete && current.primaryDone) this.show({ ...current, interrupted: true });
     this.current = null;
   }
-  private show(reply: LiveReply): void {
-    this.shownReply = reply;
-    // A held reply keeps its text on screen and only gains what arrives later (alternative, grounding, sources).
-    if (this.heldReply?.id === reply.id) this.heldReply = reply;
-  }
+  private show(reply: LiveReply): void { this.reading.show(reply); }
   /** The content filter stopped this reply: none of its text stays, neither shown, held nor as an interrupted line. */
   private withdraw(id: string): void {
     if (this.current?.id === id) this.current = null;
-    if (this.shownReply?.id === id) this.shownReply = null;
-    if (this.heldReply?.id === id) this.heldReply = null;
+    this.reading.withdraw(id);
   }
   /**
    * What a reply answers. The server gathers the finals of one settle window into one reply but names only the latest turn;
