@@ -239,7 +239,7 @@ public sealed partial class ApiTests
     public void TranscribeOnlyRejectsNonBoolean(string value)
     {
         var json = Start[..^1] + ",\"options\":{\"transcribeOnly\":" + value + "}}";
-        Assert.False(MeetingSession.IsValidStart(Encoding.UTF8.GetBytes(json)));
+        Assert.False(SessionWire.IsValidStart(Encoding.UTF8.GetBytes(json)));
     }
 
     [Fact]

@@ -61,13 +61,13 @@ public sealed class ParticipantNotesTests
     {
         const string written = "  B안 선호.\n예산은 5천 달러 이하.\t\t3분기 전에는 약속하지 않음.  ";
         const string kept = "B안 선호. 예산은 5천 달러 이하. 3분기 전에는 약속하지 않음.";
-        var settings = new ServiceSettings { ChatDeployment = "chat", EmbeddingDeployment = "embedding", CommitmentPolicy = true };
+        var settings = new ServiceSettings { ChatDeployment = "chat", EmbeddingDeployment = "embedding" };
         var plain = await PromptAsync(Parse(StartOptions + "}"), settings);
         var noted = await PromptAsync(Parse(StartOptions + ",\"notes\":" + JsonSerializer.Serialize(written) + "}"), settings);
 
-        // The same messages, plus the instruction as the last system message, after the commitment policy.
+        // The same messages, plus the instruction as the last system message.
         var systems = plain.Count(message => message.Role == "system");
-        Assert.Equal(3, systems);
+        Assert.Equal(2, systems);
         Assert.Equal(plain.Length + 1, noted.Length);
         Assert.Equal(plain[..systems], noted[..systems]);
         Assert.Equal(("system", Instruction), noted[systems]);

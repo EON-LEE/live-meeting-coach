@@ -44,8 +44,7 @@ public static class KnowledgeEndpoints
         if (mutation || context.Request.Headers.ContainsKey("Origin")) return OriginPolicy.Allows(context, settings);
         if (!settings.Fake) return true;
         return context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote) &&
-            (context.Request.Host.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-             (IPAddress.TryParse(context.Request.Host.Host.Trim('[', ']'), out var host) && IPAddress.IsLoopback(host))) &&
+            OriginPolicy.IsLoopbackHost(context.Request.Host.Host) &&
             context.Request.Headers["Sec-Fetch-Site"] != "cross-site";
     }
 

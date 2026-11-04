@@ -12,7 +12,7 @@ public sealed class ProviderInstrumentationTests
     [Fact]
     public void ChatOptionsOmitTemperatureForReasoningModelCompatibility()
     {
-        var options = AzureMeetingProvider.CreateChatOptions(new ServiceSettings { ChatMaxOutputTokens = 3072 });
+        var options = AzureMeetingProvider.CreateChatOptions(3072);
         Assert.Null(options.Temperature);
         Assert.Equal(3072, options.MaxOutputTokenCount);
         Assert.Equal(2048, ServiceSettings.ReadChatTokenLimit(new ConfigurationBuilder().Build()));
@@ -27,6 +27,106 @@ public sealed class ProviderInstrumentationTests
         var config = new ConfigurationBuilder().AddInMemoryCollection(
             new Dictionary<string, string?> { ["Azure:ChatMaxOutputTokens"] = value }).Build();
         Assert.Throws<InvalidOperationException>(() => ServiceSettings.ReadChatTokenLimit(config));
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("true", true)]
+    [InlineData("False", false)]
+    public void StreamUsageIsAnOffByDefaultSwitch(string? value, bool expected)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Azure:ChatStreamUsage"] = value, ["Provider:Mode"] = "Fake" }).Build();
+        Assert.Equal(expected, ServiceSettings.Read(config, new Environment()).ChatStreamUsage);
+    }
+
+    [Fact]
+    public void AnInvalidStreamUsageSwitchPreventsStartup()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Azure:ChatStreamUsage"] = "yes", ["Provider:Mode"] = "Fake" }).Build();
+        Assert.Throws<InvalidOperationException>(() => ServiceSettings.Read(config, new Environment()));
+    }
+
+    [Fact]
+    public void TheAnswerFlagsAreOffByDefault()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Provider:Mode"] = "Fake" }).Build();
+        var settings = ServiceSettings.Read(config, new Environment());
+        Assert.Null(settings.ChatServiceTier);
+        Assert.Equal("off", settings.ChatPromptCacheKey);
+        Assert.False(settings.RouteInFocus);
+    }
+
+    [Theory]
+    [InlineData("Azure:ChatServiceTier", " Priority ", "priority")]
+    [InlineData("Azure:ChatServiceTier", "auto", "auto")]
+    [InlineData("Azure:ChatServiceTier", "", null)]
+    [InlineData("Azure:ChatPromptCacheKey", "STATIC", "static")]
+    [InlineData("Azure:ChatPromptCacheKey", "session", "session")]
+    [InlineData("Azure:ChatPromptCacheKey", " ", "off")]
+    [InlineData("Reply:RouteInFocus", "True", "True")]
+    [InlineData("Reply:RouteInFocus", "false", "False")]
+    public void TheAnswerFlagsAcceptTheirDocumentedValues(string key, string value, string? expected)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [key] = value, ["Provider:Mode"] = "Fake" }).Build();
+        var settings = ServiceSettings.Read(config, new Environment());
+        Assert.Equal(expected, key switch
+        {
+            "Azure:ChatServiceTier" => settings.ChatServiceTier,
+            "Azure:ChatPromptCacheKey" => settings.ChatPromptCacheKey,
+            _ => settings.RouteInFocus.ToString()
+        });
+    }
+
+    [Theory]
+    [InlineData("Azure:ChatServiceTier", "fastest")]
+    [InlineData("Azure:ChatPromptCacheKey", "user")]
+    [InlineData("Azure:ChatPromptCacheKey", "on")]
+    [InlineData("Reply:RouteInFocus", "yes")]
+    public void AnInvalidAnswerFlagPreventsStartup(string key, string value)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { [key] = value, ["Provider:Mode"] = "Fake" }).Build();
+        var error = Assert.Throws<InvalidOperationException>(() => ServiceSettings.Read(config, new Environment()));
+        Assert.Contains(key, error.Message);
+    }
+
+    [Theory]
+    [InlineData(64_000, 1.0, 500, 500)]
+    [InlineData(32_000, 0.2, 800, 0)]
+    [InlineData(48_000, 0, 1200, 300)]
+    public void RecognitionLagIsPushedAudioMinusTheEndOfTheRecognizedAudio(long pushedBytes, double offsetSeconds,
+        int durationMs, double expectedMs)
+    {
+        Assert.Equal(expectedMs, AzureMeetingProvider.RecognitionLagMs(pushedBytes, TimeSpan.FromSeconds(offsetSeconds).Ticks,
+            TimeSpan.FromMilliseconds(durationMs)), precision: 6);
+    }
+
+    [Fact]
+    public void RecognitionLagIsTaggedOnlyByKind()
+    {
+        var values = new List<(string Name, double Value, KeyValuePair<string, object?>[] Tags)>();
+        using var listener = Listen(values);
+        MeetingMetrics.SpeechRecognitionLag(123.25, final: false);
+        MeetingMetrics.SpeechRecognitionLag(987.75, final: true);
+        lock (values)
+        {
+            var lags = values.Where(value => value.Name == "voiceassistant.speech.recognition_lag" && value.Value is 123.25 or 987.75).ToArray();
+            Assert.Equal(2, lags.Length);
+            Assert.Equal([new("kind", "partial")], lags[0].Tags);
+            Assert.Equal([new("kind", "final")], lags[1].Tags);
+        }
+    }
+
+    private sealed class Environment : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Development";
+        public string ApplicationName { get; set; } = "test";
+        public string ContentRootPath { get; set; } = "";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
     [Fact]
@@ -50,7 +150,7 @@ public sealed class ProviderInstrumentationTests
     public async Task AzureStartupRequiresCredentialBeforeNativeSpeechConnection()
     {
         var credential = new Credential { Failure = new InvalidOperationException("sensitive-credential-error") };
-        var provider = new AzureMeetingProvider(new ServiceSettings
+        var provider = WithCredential(new ServiceSettings
         {
             SpeechRegion = "eastus",
             SpeechResourceId = "/resource",
@@ -67,7 +167,7 @@ public sealed class ProviderInstrumentationTests
     public async Task CancelledStartupDoesNotAcquireTokenOrCreateRecognizer()
     {
         var credential = new Credential();
-        var provider = new AzureMeetingProvider(new ServiceSettings
+        var provider = WithCredential(new ServiceSettings
         {
             OpenAIEndpoint = "https://example.openai.azure.com",
             ChatDeployment = "test"
@@ -77,6 +177,12 @@ public sealed class ProviderInstrumentationTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             provider.StartSpeechAsync(_ => Assert.Fail(), _ => Assert.Fail(), cancellation.Token));
         Assert.Equal(0, credential.Calls);
+    }
+
+    private static AzureMeetingProvider WithCredential(ServiceSettings settings, TokenCredential credential)
+    {
+        var openAI = new Azure.AI.OpenAI.AzureOpenAIClient(new Uri(settings.OpenAIEndpoint), credential);
+        return new AzureMeetingProvider(settings, openAI, null, openAI, credential);
     }
 
     [Fact]

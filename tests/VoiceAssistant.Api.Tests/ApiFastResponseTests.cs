@@ -258,18 +258,25 @@ public sealed partial class ApiTests
     [Fact]
     public async Task SettledQueuedTargetIsNotContaminatedByNewerUnresolvedFragment()
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true, FailFirstAnswer = true };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "conversation", replySettleMs = 300 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
         provider.Emit(new("one", 1, "What is our delivery plan?", true));
+        await clock.WaitForTimersAsync(++timers);
+        clock.Advance(TimeSpan.FromMilliseconds(300));
         await provider.FirstAnswerStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
         provider.Emit(new("two", 1, "Who owns the launch decision?", true));
         await Until(socket, "transcript.final");
-        await Task.Delay(450);
+        await clock.WaitForTimersAsync(++timers);
+        // The settle of "two" is queued now, before the fragment, so it queues "two" behind the running reply.
+        clock.Advance(TimeSpan.FromMilliseconds(450));
         provider.Emit(new("fragment", 1, "And", true));
         await Until(socket, "transcript.final");
+        await clock.WaitForTimersAsync(++timers);
         provider.FirstAnswerRelease.SetResult();
         Assert.Equal("provider_failed", (await Until(socket, "error")).GetProperty("code").GetString());
         var recovered = await Until(socket, "response.completed");
@@ -280,30 +287,39 @@ public sealed partial class ApiTests
             history.Select(turn => turn.Text));
         Assert.False(history[0].CurrentResponseTarget);
         Assert.True(history[1].CurrentResponseTarget);
-        await Task.Delay(400);
+        clock.Advance(TimeSpan.FromMilliseconds(400));
+        await Send(socket, """{"type":"session.stop"}""");
+        Assert.DoesNotContain(await ReceiveUntilCloseAsync(socket), message => TypeOf(message) == "response.started");
         Assert.Equal(2, provider.Answers);
     }
 
     [Fact]
     public async Task SettledRepliesSkipBackchannelsAndAnswerGatheredSpeechOnce()
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true, Alternative = "What is the price?" };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "grounded", replySettleMs = 400 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
         provider.Emit(new("a", 1, "Yeah.", true));
         provider.Emit(new("b", 1, "OK, good.", true));
         await Until(socket, "transcript.final");
         await Until(socket, "transcript.final");
-        await Task.Delay(900);
-        Assert.Equal(0, provider.Answers);
+        await clock.WaitForTimersAsync(timers += 2);
+        clock.Advance(TimeSpan.FromMilliseconds(900));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
         provider.Emit(new("c", 1, "So we are going to sell this remote control.", true));
         provider.Emit(new("d", 1, "What price should we pick?", true));
+        await clock.WaitForTimersAsync(timers += 2);
+        clock.Advance(TimeSpan.FromMilliseconds(400));
         var completed = await Until(socket, "response.completed");
         Assert.Equal("d", completed.GetProperty("turnId").GetString());
         Assert.True(completed.GetProperty("respondNow").GetBoolean());
-        await Task.Delay(900);
+        clock.Advance(TimeSpan.FromMilliseconds(900));
+        await Send(socket, """{"type":"session.stop"}""");
+        Assert.DoesNotContain(await ReceiveUntilCloseAsync(socket), message => TypeOf(message) == "response.started");
         Assert.Equal(1, provider.Answers);
         var history = Assert.IsType<ConversationTurn[]>(provider.LastHistory);
         Assert.Contains(history, turn => turn.Text.Contains("remote control"));
@@ -315,24 +331,29 @@ public sealed partial class ApiTests
     [Fact]
     public async Task CompleteQuestionAfterStatementRepliesOnceAfterShortSettleWithBothTurns()
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "grounded", replySettleMs = 1000 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
 
         provider.Emit(new("statement", 1, "The dashboard separates evergreen and trending signals.", true));
         await Until(socket, "transcript.final");
-        await Task.Delay(300);
-        Assert.Equal(0, provider.Answers);
+        await clock.WaitForTimersAsync(++timers);
+        clock.Advance(TimeSpan.FromMilliseconds(300));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
 
         provider.Emit(new("question", 1, "How do you support the 2.1 million post figure?", true));
-        await Task.Delay(100);
-        Assert.Equal(0, provider.Answers);
+        await Until(socket, "transcript.final");
+        await clock.WaitForTimersAsync(++timers);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
 
-        using var settled = new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
-        while (provider.Answers == 0)
-            await Task.Delay(10, settled.Token);
+        // The gathered speech now ends with a complete question: 300 ms after it, not the full 1000 ms window.
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        Assert.Equal("question", StartedTurn(await ReceiveUntilAsync(socket, Completed)));
         Assert.Equal(1, provider.Answers);
         var history = Assert.IsType<ConversationTurn[]>(provider.LastHistory);
         Assert.Contains(history, turn => turn.Text.Contains("2.1 million"));
@@ -345,40 +366,54 @@ public sealed partial class ApiTests
     [InlineData("Let's talk about the budget.")]
     public async Task RequestWithoutQuestionMarkRepliesAfterShortSettleInsteadOfStayingSilent(string request)
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "grounded", replySettleMs = 1000 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
 
         provider.Emit(new("request", 1, request, true));
-        await Task.Delay(100);
-        Assert.Equal(0, provider.Answers);
+        await Until(socket, "transcript.final");
+        await clock.WaitForTimersAsync(timers + 1);
+        clock.Advance(TimeSpan.FromMilliseconds(299));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
 
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         var completed = await Until(socket, "response.completed");
         Assert.Equal("request", completed.GetProperty("turnId").GetString());
         Assert.Equal(1, provider.Answers);
+        await Send(socket, """{"type":"session.stop"}""");
     }
 
     [Fact]
     public async Task HesitationFragmentWaitsForItsContinuationAndGetsOneMergedReply()
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "grounded", replySettleMs = 1000 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
 
         // Speech-to-text often punctuates the unfinished first half of a sentence as a question.
         provider.Emit(new("fragment", 1, "Could you walk us through?", true));
         await Until(socket, "transcript.final");
-        await Task.Delay(500);
-        Assert.Equal(0, provider.Answers);
+        await clock.WaitForTimersAsync(++timers);
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
 
         provider.Emit(new("rest", 1, "The timeline for the next two weeks.", true));
+        await Until(socket, "transcript.final");
+        await clock.WaitForTimersAsync(++timers);
+        clock.Advance(TimeSpan.FromMilliseconds(1000));
         var completed = await Until(socket, "response.completed");
         Assert.Equal("rest", completed.GetProperty("turnId").GetString());
-        await Task.Delay(700);
+        clock.Advance(TimeSpan.FromMilliseconds(700));
+        await Send(socket, """{"type":"session.stop"}""");
+        Assert.DoesNotContain(await ReceiveUntilCloseAsync(socket), message => TypeOf(message) == "response.started");
         Assert.Equal(1, provider.Answers);
         var history = Assert.IsType<ConversationTurn[]>(provider.LastHistory);
         Assert.Equal(["Could you walk us through?", "The timeline for the next two weeks."],
@@ -388,18 +423,24 @@ public sealed partial class ApiTests
     [Fact]
     public async Task IncompleteFragmentStillRepliesAfterTheFullSettleWindowIfNothingFollows()
     {
+        var clock = new ManualClock();
         var provider = new ControlledProvider { AutomaticRetrieval = true };
-        await using var host = await Host.StartAsync(provider: provider);
+        await using var host = await Host.StartAsync(provider: provider, clock: clock);
         using var socket = await host.ConnectAsync();
         await Send(socket, WithOptions(new { responseMode = "grounded", replySettleMs = 600 }));
         await Receive(socket);
+        var timers = clock.TimersCreated;
 
         provider.Emit(new("fragment", 1, "Could you walk us through?", true));
-        await Task.Delay(400);
-        Assert.Equal(0, provider.Answers);
+        await Until(socket, "transcript.final");
+        await clock.WaitForTimersAsync(timers + 1);
+        clock.Advance(TimeSpan.FromMilliseconds(599));
+        Assert.DoesNotContain(await SentBeforeProbeAsync(socket), message => TypeOf(message) == "response.started");
+        clock.Advance(TimeSpan.FromMilliseconds(1));
         var completed = await Until(socket, "response.completed");
         Assert.Equal("fragment", completed.GetProperty("turnId").GetString());
         Assert.Equal(1, provider.Answers);
+        await Send(socket, """{"type":"session.stop"}""");
     }
 
     [Fact]

@@ -20,9 +20,11 @@ public sealed class SessionSlotTests
         Assert.NotNull(fresh);
         Assert.False(fresh.Superseded.IsCancellationRequested);
         stale.Dispose();
-        Assert.Null(slots.TryAcquire("user-a"));
+        var third = slots.AcquireAsync("user-a", CancellationToken.None);
+        Assert.True(fresh.Superseded.IsCancellationRequested);
+        Assert.False(third.IsCompleted);
         fresh.Dispose();
-        using var after = slots.TryAcquire("user-a");
+        using var after = await third.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.NotNull(after);
     }
 
@@ -34,5 +36,31 @@ public sealed class SessionSlotTests
         using var b = await slots.AcquireAsync("user-b", CancellationToken.None);
         Assert.NotNull(b);
         Assert.False(a!.Superseded.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task AReconnectRacingTheOldSessionsReleaseStillGetsTheSlot()
+    {
+        // The old session may release its slot (disposing its token source) between the reconnect's lookup and its supersede.
+        var slots = new SessionSlots();
+        for (var attempt = 0; attempt < 10_000; attempt++)
+        {
+            var stale = await slots.AcquireAsync("user-a", CancellationToken.None);
+            Assert.NotNull(stale);
+            using var start = new Barrier(2);
+            var release = Task.Run(() =>
+            {
+                start.SignalAndWait();
+                stale.Dispose();
+            });
+            var reconnect = Task.Run(async () =>
+            {
+                start.SignalAndWait();
+                return await slots.AcquireAsync("user-a", CancellationToken.None);
+            });
+            await release;
+            using var fresh = await reconnect.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.NotNull(fresh);
+        }
     }
 }

@@ -58,7 +58,62 @@ public sealed partial class ApiTests
         var delta = Assert.Single(messages, message => TypeOf(message) == "response.delta");
         Assert.True(delta.GetProperty("primaryDone").GetBoolean());
         Assert.Equal(messages[^1].GetProperty("text").GetString(), delta.GetProperty("text").GetString());
+        // The profile route has no turn classifier, so it never claims a verdict.
+        Assert.False(delta.TryGetProperty("decision", out _));
         await Send(socket, """{"type":"session.stop"}""");
+    }
+
+    [Theory]
+    [InlineData(true, "respond")]
+    [InlineData(false, "listen")]
+    public async Task ThePrimaryLineCarriesTheClassifiersVerdictWhenItIsAlreadyKnown(bool respond, string decision)
+    {
+        using var capture = new MetricCapture();
+        var signal = new TaskCompletionSource<bool>();
+        signal.SetResult(respond);
+        var provider = new ControlledProvider { AutomaticRetrieval = true, Alternative = "Let's check the next step.", TurnSignal = signal };
+        var (deltas, completed) = await PrimaryStreamAsync(provider);
+
+        AssertPrimaryDeltas(deltas, completed);
+        Assert.Equal(decision, deltas[^1].GetProperty("decision").GetString());
+        Assert.All(deltas[..^1], delta => Assert.False(delta.TryGetProperty("decision", out _)));
+        Assert.Equal(respond, completed.GetProperty("respondNow").GetBoolean());
+        var counted = Assert.Single(capture.Named("voiceassistant.reply.decision"));
+        Assert.Equal([new("decision", decision)], counted.Tags);
+    }
+
+    [Fact]
+    public async Task APrimaryLineEndingBeforeTheClassifierAnswersCarriesNoVerdict()
+    {
+        using var capture = new MetricCapture();
+        var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new ControlledProvider { AutomaticRetrieval = true, TurnSignal = signal };
+        await using var host = await Host.StartAsync(provider: provider);
+        using var socket = await host.ConnectAsync();
+        await Send(socket, WithOptions(new { responseMode = "grounded" }));
+        await Receive(socket);
+        provider.Emit(new("q", 1, "What is the next step for the rollout?", true));
+        var messages = await ReceiveUntilAsync(socket, found => found.Any(message => TypeOf(message) == "response.delta" && IsPrimaryDone(message)));
+        // The verdict arrives only after the primary line ended: it may still shape respondNow, never the sent delta.
+        signal.SetResult(true);
+        messages.AddRange(await ReceiveUntilAsync(socket, Completed));
+
+        var primary = Assert.Single(messages, message => TypeOf(message) == "response.delta" && IsPrimaryDone(message));
+        // Without a verdict the delta keeps exactly its previous shape.
+        Assert.Equal(["type", "responseId", "turnId", "text", "primaryDone"], primary.EnumerateObject().Select(property => property.Name));
+        var counted = Assert.Single(capture.Named("voiceassistant.reply.decision"));
+        Assert.Equal([new("decision", "unknown")], counted.Tags);
+        await Send(socket, """{"type":"session.stop"}""");
+    }
+
+    [Fact]
+    public void TheVerdictIsReadWithoutWaitingAndAFailedClassifierIsUnknown()
+    {
+        Assert.Equal("respond", ReplyGeneration.Decision(Task.FromResult(true)));
+        Assert.Equal("listen", ReplyGeneration.Decision(Task.FromResult(false)));
+        Assert.Equal("unknown", ReplyGeneration.Decision(new TaskCompletionSource<bool>().Task));
+        Assert.Equal("unknown", ReplyGeneration.Decision(Task.FromException<bool>(new InvalidOperationException("Synthetic."))));
+        Assert.Equal("unknown", ReplyGeneration.Decision(Task.FromCanceled<bool>(new CancellationToken(true))));
     }
 
     private static async Task<(JsonElement[] Deltas, JsonElement Completed)> PrimaryStreamAsync(ControlledProvider provider)

@@ -19,7 +19,8 @@ public sealed class RetrievalQueryTests
         var history = Enumerable.Range(0, 12).Select(index => new ConversationTurn(
             $"topic{index} " + new string('x', 8000) + " cannot ship")).ToArray();
         var query = RetrievalQuery.Build("current " + new string('y', 8000) + " not tomorrow", history);
-        Assert.True(query.Length <= RetrievalQuery.MaximumLength);
+        // The search query stays well inside the 4,096 characters the service accepts.
+        Assert.True(query.Length <= 4096);
         Assert.DoesNotContain("topic6", query);
         Assert.Contains("topic0", query);
         Assert.Contains("topic4", query);

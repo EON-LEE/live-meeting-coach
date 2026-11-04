@@ -38,7 +38,7 @@ public static class OriginPolicy
             origin == uri.GetLeftPart(UriPartial.Authority) && IsLoopbackHost(uri.Host);
     }
 
-    private static bool IsLoopbackHost(string host) => host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+    internal static bool IsLoopbackHost(string host) => host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
         (IPAddress.TryParse(host.Trim('[', ']'), out var address) && IPAddress.IsLoopback(address));
 }
 

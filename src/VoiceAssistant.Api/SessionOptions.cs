@@ -47,6 +47,11 @@ public sealed partial record SessionOptions
     /// </summary>
     public bool ResumeConversation { get; init; }
     public static SessionOptions Legacy { get; } = new();
+    /// <summary>
+    /// A random value the server gives each session for <c>Azure:ChatPromptCacheKey=session</c>; never sent by the client and
+    /// never derived from the user.
+    /// </summary>
+    internal string CacheScope { get; init; } = "";
 
     internal static SessionOptions Parse(JsonElement value)
     {

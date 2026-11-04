@@ -45,13 +45,13 @@ internal static partial class MaterialPhrases
         // An all-capital word that also appears in lower case is a shouted heading word ("OVERVIEW"), not an acronym.
         var lowercase = new HashSet<string>(StringComparer.Ordinal);
         foreach (var text in sources)
-            Scan(text, () => { foreach (Match word in LowercaseWord().Matches(text)) lowercase.Add(word.Value); });
+            Scan(() => { foreach (Match word in LowercaseWord().Matches(text)) lowercase.Add(word.Value); });
         foreach (var title in titles) Add(TitleText(title), Kind.Title);
         // Single capitalized words: how often each occurs, and how often on its own in mid-sentence.
         var single = new Dictionary<string, (int Total, int Standalone)>(StringComparer.Ordinal);
         foreach (var text in sources)
         {
-            Scan(text, () =>
+            Scan(() =>
             {
                 foreach (Match match in ProductCode().Matches(text)) Add(match.Value, Kind.Code);
                 foreach (Match match in Acronym().Matches(text))
@@ -105,7 +105,7 @@ internal static partial class MaterialPhrases
         return client.Concat(materials.Where(seen.Add).Take(MaxPhrases)).ToArray();
     }
 
-    private static void Scan(string text, Action scan)
+    private static void Scan(Action scan)
     {
         // A pathological text is skipped rather than allowed to stall a session start.
         try { scan(); }
@@ -220,7 +220,7 @@ internal static partial class MaterialPhrases
 }
 
 /// <summary>
-/// Speech phrase hints from the caller's own materials (experiment switch <c>Speech:MaterialPhraseHints</c>). Built from the
+/// Speech phrase hints from the caller's own materials (switch <c>Speech:MaterialPhraseHints</c>). Built from the
 /// ACL-filtered material text, cached per user, and dropped when that user uploads or deletes materials (or after
 /// <see cref="CacheLifetime"/>). Search shows such a change only after a short delay, so a build applies the materials
 /// service's own record of it (documents written but not yet listed, documents deleted but maybe still listed), and a build

@@ -94,7 +94,7 @@ public sealed class PracticeServiceTests
         Assert.Equal("grounded", result.RootElement.GetProperty("grounding").GetString());
         var source = Assert.Single(result.RootElement.GetProperty("sources").EnumerateArray());
         Assert.Equal("Plan notes", source.GetProperty("title").GetString());
-        Assert.Equal("Warning: Practice endpoint suggest failure retrieval_retry, HTTP status 0, attempt 1.", Assert.Single(logger.Lines));
+        Assert.Equal((LogLevel.Warning, "Practice endpoint suggest failure retrieval_retry, HTTP status 0, attempt 1."), Assert.Single(logger.Entries));
     }
 
     [Fact]
@@ -119,9 +119,9 @@ public sealed class PracticeServiceTests
         Assert.Single(model.Retries);
         Assert.Equal(new[]
         {
-            "Warning: Practice endpoint suggest failure retrieval_retry, HTTP status 0, attempt 1.",
-            "Warning: Practice endpoint suggest failure retrieval_unavailable, HTTP status 0, attempt 2."
-        }, logger.Lines);
+            (LogLevel.Warning, "Practice endpoint suggest failure retrieval_retry, HTTP status 0, attempt 1."),
+            (LogLevel.Warning, "Practice endpoint suggest failure retrieval_unavailable, HTTP status 0, attempt 2.")
+        }, logger.Entries);
     }
 
     [Fact]
@@ -197,14 +197,6 @@ public sealed class PracticeServiceTests
         ListLogger<PracticeService>? logger = null) =>
         new(model, new FakePracticeSpeech(), retrieval ?? new(), new ServiceSettings(), logger)
         { RetrievalAttemptLimit = attemptLimit ?? TimeSpan.FromSeconds(5) };
-    private sealed class ListLogger<T> : ILogger<T>
-    {
-        public List<string> Lines { get; } = [];
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel logLevel) => true;
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Lines.Add(logLevel + ": " + formatter(state, exception));
-    }
     private sealed class Model(params string[] results) : IPracticeModel
     {
         public List<bool> Retries { get; } = [];

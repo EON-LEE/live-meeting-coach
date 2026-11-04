@@ -127,9 +127,8 @@ public sealed class AzurePracticeModel(AzureOpenAIClient openAI, ServiceSettings
                     " Correct that rule and produce a fresh fully valid object; do not add explanations." : "")),
             new UserChatMessage("<untrusted_json>\n" + data + "\n</untrusted_json>")
         ];
-        var options = AzureMeetingProvider.CreateChatOptions(settings);
-        options.MaxOutputTokenCount = request.Operation == "enrich" && request.TranslationOnly
-            ? 1024 : Math.Max(4096, settings.ChatMaxOutputTokens);
+        var options = AzureMeetingProvider.CreateChatOptions(request.Operation == "enrich" && request.TranslationOnly
+            ? 1024 : Math.Max(4096, settings.ChatMaxOutputTokens));
         options.ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat();
         var result = await openAI.GetChatClient(settings.ChatDeployment).CompleteChatAsync(messages, options, cancellation);
         if (result.Value.FinishReason != ChatFinishReason.Stop)

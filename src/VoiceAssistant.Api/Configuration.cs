@@ -21,34 +21,47 @@ public sealed class ServiceSettings
     public int ChatMaxOutputTokens { get; init; } = 2048;
     /// <summary>Reasoning effort sent with the live answer request (minimal, low or medium); null sends none.</summary>
     public string? ChatReasoningEffort { get; init; }
-    /// <summary>Reasoning effort sent with the turn classifier and Korean translation requests; null sends none.</summary>
-    public string? ChatAuxiliaryReasoningEffort { get; init; }
-    /// <summary>An api-version for the live chat requests instead of the pinned SDK's default; null keeps the SDK default.</summary>
-    public string? ChatApiVersion { get; init; }
+    /// <summary>
+    /// Switch: the streamed live answer asks for its token usage (<c>stream_options.include_usage</c>) so it can be counted.
+    /// Off sends the request exactly as before.
+    /// </summary>
+    public bool ChatStreamUsage { get; init; }
+    /// <summary>
+    /// The <c>service_tier</c> sent with the live answer request only (auto, default, flex, priority or scale); null sends none.
+    /// </summary>
+    public string? ChatServiceTier { get; init; }
+    /// <summary>
+    /// The live answer's <c>prompt_cache_key</c>: <c>off</c> (default) sends none, <c>static</c> one constant for the deployment
+    /// and prompt version, <c>session</c> a random key per session. Never derived from the user.
+    /// </summary>
+    public string ChatPromptCacheKey { get; init; } = "off";
+    /// <summary>
+    /// Switch: the answer prompt names the response route in its response focus instead of its session context, and puts the
+    /// search-failure instructions after the evidence, so a session's replies share a longer unchanging prefix.
+    /// </summary>
+    public bool RouteInFocus { get; init; }
     public string EmbeddingDeployment { get; init; } = "";
     public string SearchEndpoint { get; init; } = "";
     public string SearchIndex { get; init; } = "";
     public string SearchSemanticConfiguration { get; init; } = "meeting-semantic";
     public double SearchMinimumRerankerScore { get; init; } = 2.0;
     public string[] AllowedOrigins { get; init; } = [];
-    /// <summary>Experiment: start the reply at a final that is a complete question or request, instead of after the settle.</summary>
+    /// <summary>Switch: start the reply at a final that is a complete question or request, instead of after the settle.</summary>
     public bool EarlyStartAtFinal { get; init; }
     /// <summary>
-    /// Experiment, on top of <see cref="EarlyStartAtFinal"/>: generate that reply already on a paused partial, held back until
+    /// Switch, on top of <see cref="EarlyStartAtFinal"/>: generate that reply already on a paused partial, held back until
     /// the final adopts it.
     /// </summary>
     public bool SpeculativeStart { get; init; }
     /// <summary>
-    /// Experiment: a short statement that waits for more context is answered after this much more quiet (milliseconds after
+    /// Switch: a short statement that waits for more context is answered after this much more quiet (milliseconds after
     /// the settle window); 0 keeps waiting for more speech.
     /// </summary>
     public int QuietReplyMs { get; init; }
     /// <summary>The most search chunks one reply may use as evidence.</summary>
     public int SearchMaxEvidence { get; init; } = 5;
-    /// <summary>Experiment: add phrase hints from the caller's own materials to the speech recognizer.</summary>
+    /// <summary>Switch: add phrase hints from the caller's own materials to the speech recognizer.</summary>
     public bool MaterialPhraseHints { get; init; }
-    /// <summary>Experiment: tell the answer model to decline guarantees and promises and state the documented policy instead.</summary>
-    public bool CommitmentPolicy { get; init; }
     public bool Fake => Mode == "Fake";
     public bool SearchEnabled => !string.IsNullOrEmpty(SearchEndpoint);
 
@@ -71,8 +84,10 @@ public sealed class ServiceSettings
             AnswerDeployment = ReadDeploymentName(config, "Azure:AnswerDeployment"),
             ChatMaxOutputTokens = ReadChatTokenLimit(config),
             ChatReasoningEffort = ReadReasoningEffort(config, "Azure:ChatReasoningEffort"),
-            ChatAuxiliaryReasoningEffort = ReadReasoningEffort(config, "Azure:ChatAuxiliaryReasoningEffort"),
-            ChatApiVersion = ReadApiVersion(config),
+            ChatStreamUsage = ReadSwitch(config, "Azure:ChatStreamUsage"),
+            ChatServiceTier = ReadServiceTier(config),
+            ChatPromptCacheKey = ReadPromptCacheKey(config),
+            RouteInFocus = ReadSwitch(config, "Reply:RouteInFocus"),
             EmbeddingDeployment = Get("Azure:EmbeddingDeployment"),
             SearchEndpoint = Get("Azure:SearchEndpoint"),
             SearchIndex = Get("Azure:SearchIndex"),
@@ -83,8 +98,7 @@ public sealed class ServiceSettings
             EarlyStartAtFinal = ReadSwitch(config, "Session:EarlyStartAtFinal"),
             SpeculativeStart = ReadSwitch(config, "Session:SpeculativeStart"),
             QuietReplyMs = ReadQuietReplyMs(config),
-            MaterialPhraseHints = ReadSwitch(config, "Speech:MaterialPhraseHints"),
-            CommitmentPolicy = ReadSwitch(config, "Reply:CommitmentPolicy")
+            MaterialPhraseHints = ReadSwitch(config, "Speech:MaterialPhraseHints")
         };
         // A speculative reply is adopted as its final's early reply, so it means nothing without early start.
         if (settings.SpeculativeStart && !settings.EarlyStartAtFinal)
@@ -154,7 +168,32 @@ public sealed class ServiceSettings
             : throw new InvalidOperationException($"{key} must be a deployment name (letters, digits, '.', '-', '_') when set.");
     }
 
-    /// <summary>An optional experiment switch: unset is off; <c>true</c> or <c>false</c> in any case; anything else prevents startup.</summary>
+    /// <summary>
+    /// Optional <c>Azure:ChatServiceTier</c>: unset or empty sends none; auto, default, flex, priority or scale in any case;
+    /// anything else prevents startup.
+    /// </summary>
+    public static string? ReadServiceTier(IConfiguration config)
+    {
+        var value = config["Azure:ChatServiceTier"];
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var tier = value.Trim().ToLowerInvariant();
+        return tier is "auto" or "default" or "flex" or "priority" or "scale"
+            ? tier
+            : throw new InvalidOperationException("Azure:ChatServiceTier must be auto, default, flex, priority or scale when set.");
+    }
+
+    /// <summary>Optional <c>Azure:ChatPromptCacheKey</c>: unset is off; otherwise off, static or session in any case.</summary>
+    public static string ReadPromptCacheKey(IConfiguration config)
+    {
+        var value = config["Azure:ChatPromptCacheKey"];
+        if (string.IsNullOrWhiteSpace(value)) return "off";
+        var mode = value.Trim().ToLowerInvariant();
+        return mode is "off" or "static" or "session"
+            ? mode
+            : throw new InvalidOperationException("Azure:ChatPromptCacheKey must be off, static or session when set.");
+    }
+
+    /// <summary>An optional switch: unset is off; <c>true</c> or <c>false</c> in any case; anything else prevents startup.</summary>
     public static bool ReadSwitch(IConfiguration config, string key)
     {
         var value = config[key];
@@ -162,18 +201,6 @@ public sealed class ServiceSettings
         return bool.TryParse(value.Trim(), out var enabled)
             ? enabled
             : throw new InvalidOperationException($"{key} must be true or false when set.");
-    }
-
-    /// <summary>An optional dated Azure OpenAI api-version (yyyy-MM-dd, optionally -preview) for the live chat requests.</summary>
-    public static string? ReadApiVersion(IConfiguration config)
-    {
-        var value = config["Azure:ChatApiVersion"];
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var version = value.Trim();
-        return System.Text.RegularExpressions.Regex.IsMatch(version, @"\A20\d\d-[01]\d-[0-3]\d(-preview)?\z",
-            System.Text.RegularExpressions.RegexOptions.CultureInvariant)
-            ? version
-            : throw new InvalidOperationException("Azure:ChatApiVersion must be a dated api-version such as 2025-04-01-preview when set.");
     }
 
     /// <summary>Optional <c>Session:QuietReplyMs</c>: unset or 0 is off; otherwise an integer from 500 to 10000.</summary>

@@ -11,7 +11,7 @@ public enum ReplyDecision { Reply, Wait, Discard }
 /// </summary>
 public static partial class ReplyTrigger
 {
-    public const int SubstantiveWords = 12;
+    private const int SubstantiveWords = 12;
 
     public static ReplyDecision Evaluate(IReadOnlyList<string> pending)
     {
@@ -43,9 +43,6 @@ public static partial class ReplyTrigger
         var text = string.Join(' ', pending);
         return IsQuestion(text, Split(text));
     }
-
-    public static bool ContainsRequest(IReadOnlyList<string> pending) =>
-        IsRequest(Split(string.Join(' ', pending)));
 
     /// <summary>True when the speech is addressed to the listener: a question or a direct request.</summary>
     public static bool InvitesReply(IReadOnlyList<string> pending)

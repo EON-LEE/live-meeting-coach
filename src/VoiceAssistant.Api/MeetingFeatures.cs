@@ -1,6 +1,6 @@
 namespace VoiceAssistant.Api;
 
-/// <summary>The experiment switches a meeting session runs with. All are off by default, which keeps the documented behavior.</summary>
+/// <summary>The switches a meeting session runs with. Off unless configured. The deployment template turns all four on.</summary>
 public sealed record MeetingFeatures
 {
     public static MeetingFeatures Off { get; } = new();
