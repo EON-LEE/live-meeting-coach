@@ -226,9 +226,11 @@ test('an empty primaryDone delta also shows the line, and a held answer stays wh
   server.send({ type: 'response.delta', turnId: 't2', responseId: 'r2', text: 'Second answer.' });
   server.send({ type: 'response.delta', turnId: 't2', responseId: 'r2', text: '', primaryDone: true });
   await expect(page.locator('#reading-status')).toContainText('새 답변 도착');
+  await expect(page.locator('#hold-answer')).toHaveText('새 답변 보기');
   await expect(page.locator('#answer-text')).toHaveText('First answer.');
   await page.locator('#hold-answer').click();
   await expect(page.locator('#answer-text')).toHaveText('Second answer.');
+  await expect(page.locator('#hold-answer')).toHaveText('답변 고정');
 });
 
 test('an interrupted primary line keeps a pushed Korean meaning, or says it has none and can be translated', async ({ page }) => {

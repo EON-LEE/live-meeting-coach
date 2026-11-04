@@ -296,6 +296,7 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#reading-status')).toContainText('답변 준비 중');
   await expect(page.locator('#answer-text')).not.toContainText('Incomplete draft');
   await expect(page.locator('#hold-answer')).toBeDisabled();
+  await expect(page.locator('#hold-answer')).toHaveText('답변 고정');
   ws.send({ type: 'response.completed', turnId: 't1', responseId: 'r1',
     text: 'Review the dependencies first.', sources: [], grounding: 'no_matches' });
   await expect(page.locator('#answer-text')).toHaveText('Review the dependencies first.');
@@ -304,10 +305,12 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#grounding-badge')).toBeVisible();
   await page.locator('#hold-answer').click();
   await expect(page.locator('#hold-answer')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#hold-answer')).toHaveText('고정 해제');
   await page.evaluate(() => { window.__heldAnswerNode = document.querySelector('#answer-text').firstChild; });
   for (const id of [2, 3]) {
     reply(ws, id, `Question ${id}?`, `Answer ${id}.`);
     await expect(page.locator('#reading-status')).toContainText('새 답변 도착');
+    await expect(page.locator('#hold-answer')).toHaveText('새 답변 보기');
     await expect(page.locator('#answer-text')).toHaveText('Review the dependencies first.');
     await expect(page.locator('#question-text')).toHaveText('What is the next step?');
     await expect(page.locator('#answer-korean')).toHaveText('뜻: Review the dependencies first.');
@@ -323,6 +326,7 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#question-text')).toHaveText('Question 3?');
   await expect(page.locator('#answer-korean')).toHaveText('뜻: Answer 3.');
   await expect(page.locator('#hold-answer')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#hold-answer')).toHaveText('답변 고정');
   ws.send({ type: 'transcript.final', turnId: 't4', revision: 1, text: 'Question 4?' });
   ws.send({ type: 'response.started', turnId: 't4', responseId: 'r4' });
   ws.send({ type: 'response.delta', turnId: 't4', responseId: 'r4', text: 'New incomplete draft' });

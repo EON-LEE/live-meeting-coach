@@ -7,7 +7,8 @@ import { HostAudioSource, hostKind, hostWebView, isHostAudioAvailable } from "./
 import { SocketTransport, asError } from "./transport.js";
 import type { SessionOptions, SessionUpdate } from "./options.js";
 import { CoachClient, CoachError, type CoachKind } from "./coach-client.js";
-import type { Grounding, ServerEvent } from "./protocol.js";
+import type { ServerEvent } from "./protocol.js";
+import { groundingBadge, groundingDetail, holdButton, holdMenuLabel, readingStatus, type ReadingInput } from "./reading-view.js";
 import { LiveState, answers, leadSentence, meaningTexts, primaryMeaning, suggestionLabels, translatable, translationChunks,
   type LiveReply, type LiveTurn } from "./live-state.js";
 import { PushedKorean, pushedKoreanWaitMs } from "./reply-korean.js";
@@ -595,15 +596,6 @@ function renderConversation(): void {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
-const groundingBadges: Readonly<Record<Grounding, string>> = {
-  grounded: "문서 인용 있음 · 내용 확인 필요", no_matches: "문서 근거 없음 · 사실 확인 필요",
-  unavailable: "자료 확인 불가 · 사실 답변에 의존하지 마세요", disabled: "문서 검색 미사용 · 대화 맥락만 사용",
-};
-const groundingDetails: Readonly<Record<Grounding, string>> = {
-  grounded: "근거 있음 · 내 업로드 문서", no_matches: "문서 근거 없음 · 사실 확인 필요",
-  unavailable: "자료 확인 불가 · 문서 검색이 실패해 일반적인 답변만 보여 줍니다", disabled: "이번 답변은 문서 검색을 사용하지 않음",
-};
-
 function renderSuggestions(): void {
   const display = state.display, values = answers(display);
   const shown = state.shown;
@@ -637,25 +629,18 @@ function renderSuggestions(): void {
   // What the reply answers: every final gathered into it (see LiveState), or the latest speech before any reply.
   setText("question-text", display?.question ?? state.turns.find(turn => turn.id === display?.turnId)?.text
     ?? (display ? "이전 대화" : state.latest?.text ?? "영어 대화를 기다리고 있어요."));
-  setText("reading-status", state.readingHeld
-    ? state.hasNewerReply ? "새 답변 도착 · 고정을 해제하면 표시합니다"
-      : generating ? "화면 고정됨 · 새 답변 준비 중"
-        : "화면 고정됨 · 오디오 전송 상태는 위에서 확인하세요"
-    : finishing ? "추천 문장입니다 · 대안과 근거를 확인하는 중"
-      : generating ? display ? "새 답변 준비 중 · 아래는 이전 질문용 답변" : "답변 준비 중 · 완성되면 표시합니다"
-        : display?.interrupted ? "답변 생성이 중단되었습니다 · 근거를 확인하지 못했습니다"
-          : display ? "추천 문장입니다 · 내용 확인 후 사용하세요"
-            : controller.active ? "듣는 중 · 답변이 완성되면 표시합니다" : idleStatus(settings));
-  const hold = $<HTMLButtonElement>("hold-answer");
-  hold.disabled = !display;
-  setPressed("hold-answer", state.readingHeld);
-  write(hold, state.readingHeld ? state.hasNewerReply ? "새 답변 보기" : "고정 해제" : "답변 고정");
+  const reading: ReadingInput = { held: state.readingHeld, hasNewer: state.hasNewerReply, generating, finishing, display: !!display,
+    interrupted: !!display?.interrupted, active: controller.active, idle: idleStatus(settings) };
+  setText("reading-status", readingStatus(reading));
+  const hold = $<HTMLButtonElement>("hold-answer"), holdView = holdButton(reading);
+  hold.disabled = holdView.disabled;
+  setPressed("hold-answer", holdView.pressed);
+  write(hold, holdView.label);
   setText("continuity", "추천은 실제로 말한 내용이 아닙니다. 화면 고정은 오디오 전송을 중지하지 않습니다.");
   const badge = $("grounding-badge");
   if (badge.dataset.grounding !== (display?.grounding ?? "")) badge.dataset.grounding = display?.grounding ?? "";
-  write(badge, display?.grounding ? groundingBadges[display.grounding]
-    : display?.interrupted ? "답변 중단 · 근거 확인 안 됨" : generating ? "근거 확인 중" : "근거 상태 대기");
-  setText("grounding-text", display?.grounding ? groundingDetails[display.grounding] : "문서 근거 상태는 답변 완료 후 표시됩니다");
+  write(badge, groundingBadge(display?.grounding, reading));
+  setText("grounding-text", groundingDetail(display?.grounding));
   const sources = display?.sources ?? [];
   setText("sources-text", sources.slice(0, 3).map(source => source.title).join(" · ") +
     (sources.length > 3 ? ` · 외 ${sources.length - 3}개` : ""));
@@ -689,9 +674,7 @@ function renderControls(): void {
   write(pauseButton, paused ? "다시 듣기" : "일시정지");
   setTitle(pauseButton, item("pause").textContent ?? "");
   item("hold").disabled = !state.display;
-  write(item("hold"), state.readingHeld
-    ? state.hasNewerReply ? "새 답변 보기 / 화면 고정 해제" : "화면 고정 해제"
-    : "읽는 동안 답변 고정 (오디오는 계속 듣기)");
+  write(item("hold"), holdMenuLabel({ held: state.readingHeld, hasNewer: state.hasNewerReply }));
   item("translate").disabled = !settings.showKorean || !translatable(state.display) && failedTurns.size === 0;
   item("float").hidden = !("documentPictureInPicture" in window);
   write(item("float"), pipWindow ? "작은 창 닫고 페이지로 돌아가기" : "항상 위 작은 창으로 띄우기");
