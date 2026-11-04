@@ -1,5 +1,6 @@
 using System.ClientModel;
 using System.ClientModel.Primitives;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -92,10 +93,117 @@ public sealed class ChatSerializationTests
         else Assert.Equal(effort, json.RootElement.GetProperty("reasoning_effort").GetString());
     }
 
+    [Fact]
+    public async Task TheLiveAnswerRequestIsUnchangedWhileStreamUsageIsOff()
+    {
+        using var handler = new CaptureHandler();
+        await DrainAnswerAsync(handler, new ServiceSettings { ChatDeployment = "test" });
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        Assert.Equal(["max_completion_tokens", "messages", "model", "stream"],
+            json.RootElement.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task StreamUsageAsksForTheAnswersUsageAndCountsItsTokensByType()
+    {
+        var tokens = new List<(long Value, string Operation, string Type)>();
+        using var listener = ListenToTokens(tokens);
+        var usage = new
+        {
+            id = "test", @object = "chat.completion.chunk", created = 1, model = "test", choices = Array.Empty<object>(),
+            usage = new
+            {
+                prompt_tokens = 3001, completion_tokens = 41, total_tokens = 3042,
+                prompt_tokens_details = new { cached_tokens = 2048 }, completion_tokens_details = new { reasoning_tokens = 7 }
+            }
+        };
+        using var handler = new CaptureHandler
+        {
+            ResponseBody = "data: " + JsonSerializer.Serialize(new
+            {
+                id = "test", @object = "chat.completion.chunk", created = 1, model = "test",
+                choices = new[] { new { index = 0, delta = new { content = "Sure." }, finish_reason = (string?)"stop" } }
+            }) + "\n\ndata: " + JsonSerializer.Serialize(usage) + "\n\ndata: [DONE]\n\n"
+        };
+        await DrainAnswerAsync(handler, new ServiceSettings { ChatDeployment = "test", ChatStreamUsage = true });
+        using var json = JsonDocument.Parse(handler.RequestBody!);
+        Assert.True(json.RootElement.GetProperty("stream_options").GetProperty("include_usage").GetBoolean());
+        Assert.Single(json.RootElement.GetProperty("stream_options").EnumerateObject());
+        lock (tokens)
+            Assert.Equal([(3001L, "answer", "input"), (2048L, "answer", "cached"), (41L, "answer", "output"), (7L, "answer", "reasoning")],
+                tokens.Where(token => token.Value is 3001 or 2048 or 41 or 7).ToArray());
+    }
+
+    [Fact]
+    public async Task TheClassifierAndTranslationCountTheirTokensWithoutStreamOptions()
+    {
+        var tokens = new List<(long Value, string Operation, string Type)>();
+        using var listener = ListenToTokens(tokens);
+        string Completion(string text) => JsonSerializer.Serialize(new
+        {
+            id = "test", @object = "chat.completion", created = 1, model = "test",
+            choices = new[] { new { index = 0, message = new { role = "assistant", content = text }, finish_reason = "stop" } },
+            usage = new
+            {
+                prompt_tokens = 9101, completion_tokens = 9103, total_tokens = 18204,
+                prompt_tokens_details = new { cached_tokens = 9102 }, completion_tokens_details = new { reasoning_tokens = 9104 }
+            }
+        });
+        using var classifier = new CaptureHandler { ResponseBody = Completion("RESPOND"), ContentType = "application/json" };
+        Assert.True(await Provider(classifier, new ServiceSettings { ChatDeployment = "test", ChatStreamUsage = true })
+            .ShouldRespondAsync([new("Any questions?")], CancellationToken.None));
+        Assert.DoesNotContain("stream_options", classifier.RequestBody);
+        using var translation = new CaptureHandler { ResponseBody = Completion("좋습니다."), ContentType = "application/json" };
+        Assert.Equal("좋습니다.", await Provider(translation, new ServiceSettings { ChatDeployment = "test", ChatStreamUsage = true })
+            .TranslateReplyAsync("Sounds good.", TranslationContext.Empty, CancellationToken.None));
+        Assert.DoesNotContain("stream_options", translation.RequestBody);
+        string[] types = ["input", "cached", "output", "reasoning"];
+        lock (tokens)
+            Assert.Equal(types.Select((type, index) => (9101L + index, "classifier", type))
+                .Concat(types.Select((type, index) => (9101L + index, "translation", type))).ToArray(),
+                tokens.Where(token => token.Value is >= 9101 and <= 9104).ToArray());
+    }
+
+    private static AzureMeetingProvider Provider(CaptureHandler handler, ServiceSettings settings)
+    {
+        var http = new HttpClient(handler, disposeHandler: false);
+        var client = new AzureOpenAIClient(new Uri("https://example.openai.azure.com"), new ApiKeyCredential("test-only-key"),
+            new AzureOpenAIClientOptions { Transport = new HttpClientPipelineTransport(http) });
+        return new AzureMeetingProvider(settings, client, null);
+    }
+
+    private static async Task DrainAnswerAsync(CaptureHandler handler, ServiceSettings settings)
+    {
+        await foreach (var _ in Provider(handler, settings).AnswerWithSuggestionsAsync([new("How does it help?")],
+            new("disabled", []), SessionOptions.Legacy, "knowledge", CancellationToken.None)) { }
+    }
+
+    private static MeterListener ListenToTokens(List<(long, string, string)> tokens)
+    {
+        var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, owner) =>
+            {
+                if (instrument.Meter.Name == MeetingMetrics.MeterName && instrument.Name == "voiceassistant.chat.tokens")
+                    owner.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var list = tags.ToArray();
+            string Tag(string key) => list.Single(tag => tag.Key == key).Value as string ?? "";
+            Assert.Equal(2, list.Length);
+            lock (tokens) tokens.Add((value, Tag("operation"), Tag("type")));
+        });
+        listener.Start();
+        return listener;
+    }
+
     private sealed class CaptureHandler : HttpMessageHandler
     {
         public string? RequestBody { get; private set; }
         public string ResponseBody { get; init; } = "data: [DONE]\n\n";
+        public string ContentType { get; init; } = "text/event-stream";
         public int Requests { get; private set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -103,7 +211,7 @@ public sealed class ChatSerializationTests
             Requests++;
             return new(HttpStatusCode.OK)
             {
-                Content = new StringContent(ResponseBody, Encoding.UTF8, "text/event-stream")
+                Content = new StringContent(ResponseBody, Encoding.UTF8, ContentType)
             };
         }
     }

@@ -21,6 +21,11 @@ public sealed class ServiceSettings
     public int ChatMaxOutputTokens { get; init; } = 2048;
     /// <summary>Reasoning effort sent with the live answer request (minimal, low or medium); null sends none.</summary>
     public string? ChatReasoningEffort { get; init; }
+    /// <summary>
+    /// Switch: the streamed live answer asks for its token usage (<c>stream_options.include_usage</c>) so it can be counted.
+    /// Off sends the request exactly as before.
+    /// </summary>
+    public bool ChatStreamUsage { get; init; }
     public string EmbeddingDeployment { get; init; } = "";
     public string SearchEndpoint { get; init; } = "";
     public string SearchIndex { get; init; } = "";
@@ -65,6 +70,7 @@ public sealed class ServiceSettings
             AnswerDeployment = ReadDeploymentName(config, "Azure:AnswerDeployment"),
             ChatMaxOutputTokens = ReadChatTokenLimit(config),
             ChatReasoningEffort = ReadReasoningEffort(config, "Azure:ChatReasoningEffort"),
+            ChatStreamUsage = ReadSwitch(config, "Azure:ChatStreamUsage"),
             EmbeddingDeployment = Get("Azure:EmbeddingDeployment"),
             SearchEndpoint = Get("Azure:SearchEndpoint"),
             SearchIndex = Get("Azure:SearchIndex"),

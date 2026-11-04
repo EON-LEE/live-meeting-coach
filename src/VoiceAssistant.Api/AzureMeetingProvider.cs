@@ -270,11 +270,12 @@ public sealed class AzureMeetingProvider : IMeetingProvider
     public async Task<bool> ShouldRespondAsync(IReadOnlyList<ConversationTurn> conversation, CancellationToken cancellation)
     {
         var transcript = string.Join("\n", conversation.TakeLast(8).Select(turn => "- " + turn.Text.ReplaceLineEndings(" ")));
-        var options = CreateChatOptions(AuxiliaryMaxOutputTokens);
+        var options = AuxiliaryOptions();
         using var call = LiveChatCall.Begin("classifier", ClassifierBudget, withinReply: true);
         var result = await openAI.GetChatClient(settings.ChatDeployment).CompleteChatAsync(
             [new SystemChatMessage(TurnPrompt), new UserChatMessage("Recent meeting speech (oldest first, speakers unknown):\n" + transcript)],
             options, cancellation);
+        MeetingMetrics.ChatTokensUsed("classifier", result.Value.Usage);
         return string.Concat(result.Value.Content.Select(part => part.Text)).Contains("RESPOND", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -302,7 +303,8 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         {
             var result = await openAI.GetChatClient(settings.ChatDeployment).CompleteChatAsync(
                 [new SystemChatMessage(KoreanTranslation.LiveInstructions), new UserChatMessage(request)],
-                CreateChatOptions(AuxiliaryMaxOutputTokens), cancellation);
+                AuxiliaryOptions(), cancellation);
+            MeetingMetrics.ChatTokensUsed("translation", result.Value.Usage);
             if (result.Value.FinishReason == ChatFinishReason.Stop &&
                 KoreanTranslation.Clean(string.Concat(result.Value.Content.Select(part => part.Text))) is { } korean)
                 return korean;
@@ -485,12 +487,14 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         // The request (and its single allowed retry) is sent within this scope, on the first step of the stream.
         using var call = LiveChatCall.Begin("answer", AnswerBudget, withinReply: true);
         await foreach (var update in openAI.GetChatClient(settings.AnswerDeployment ?? settings.ChatDeployment)
-            .CompleteChatStreamingAsync(messages, CreateChatOptions(settings.ChatMaxOutputTokens, settings.ChatReasoningEffort), cancellation))
+            .CompleteChatStreamingAsync(messages, AnswerOptions(), cancellation))
         {
             // With asynchronous filtering the verdict can follow text already streamed, even a "stop" update, so every update
             // is checked until the stream ends. A stopped reply never completes; the session withdraws what was sent.
             if (update.FinishReason == ChatFinishReason.ContentFilter)
                 throw new ProviderException("response_filtered", FilteredMessage);
+            // Only with Azure:ChatStreamUsage: the last chunk carries the usage, after all text.
+            if (update.Usage is { } usage) MeetingMetrics.ChatTokensUsed("answer", usage);
             foreach (var part in update.ContentUpdate)
                 if (!string.IsNullOrEmpty(part.Text)) yield return part.Text;
         }
@@ -501,12 +505,25 @@ public sealed class AzureMeetingProvider : IMeetingProvider
     /// <summary>The output cap of the turn classifier and the Korean translation, which are one word or one short line.</summary>
     internal const int AuxiliaryMaxOutputTokens = 1024;
 
-    internal static ChatCompletionOptions CreateChatOptions(int maxOutputTokens, string? reasoningEffort = null)
+    /// <summary>The turn classifier's and the Korean translation's options: the output cap only.</summary>
+    private static ChatCompletionOptions AuxiliaryOptions() => CreateChatOptions(AuxiliaryMaxOutputTokens);
+
+    /// <summary>The live answer's options: its output cap, the configured reasoning effort and, when switched on, its usage.</summary>
+    private ChatCompletionOptions AnswerOptions() =>
+        CreateChatOptions(settings.ChatMaxOutputTokens, settings.ChatReasoningEffort, settings.ChatStreamUsage);
+
+    /// <summary>
+    /// Chat options with the wire properties the pinned SDK has no option for. Each one that is set goes into the
+    /// additional-property bag (which the 2.1 extension requires to be initialized by the SDK model reader) and is sent as-is:
+    /// <c>reasoning_effort</c>, and <c>stream_options</c> asking a streamed call for its usage (a non-streaming request
+    /// drops it). Nothing unset is sent, so with none set the request is the SDK's own.
+    /// </summary>
+    internal static ChatCompletionOptions CreateChatOptions(int maxOutputTokens, string? reasoningEffort = null, bool streamUsage = false)
     {
-        // The 2.1 extension requires the additional-property bag initialized by the SDK model reader. The pinned SDK has no
-        // reasoning-effort option, so a configured effort is read into that bag and sent as the wire property reasoning_effort.
-        var json = reasoningEffort is null ? "{}" : JsonSerializer.Serialize(new Dictionary<string, string> { ["reasoning_effort"] = reasoningEffort });
-        var options = ModelReaderWriter.Read<ChatCompletionOptions>(BinaryData.FromString(json))
+        var wire = new Dictionary<string, object>();
+        if (reasoningEffort is not null) wire["reasoning_effort"] = reasoningEffort;
+        if (streamUsage) wire["stream_options"] = new Dictionary<string, bool> { ["include_usage"] = true };
+        var options = ModelReaderWriter.Read<ChatCompletionOptions>(BinaryData.FromString(JsonSerializer.Serialize(wire)))
             ?? throw new InvalidOperationException("Could not initialize chat options.");
         options.MaxOutputTokenCount = maxOutputTokens;
         // Azure.AI.OpenAI 2.1 otherwise rewrites this option to legacy max_tokens, rejected by GPT-5.
@@ -523,6 +540,13 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         foreach (var phrase in phrases) addPhrase(phrase);
     }
 
+    /// <summary>
+    /// How far recognition trails the pushed audio when a result arrives: the audio pushed so far (PCM16 mono 16 kHz) minus
+    /// the end of the recognized audio (its offset plus duration, in 100 ns ticks from the stream start).
+    /// </summary>
+    internal static double RecognitionLagMs(long pushedBytes, long offsetTicks, TimeSpan duration) =>
+        (pushedBytes / 32000.0 - (offsetTicks + duration.Ticks) / (double)TimeSpan.TicksPerSecond) * 1000;
+
     private sealed class AzureSpeechStream : ISpeechStream
     {
         private readonly AudioStreamFormat format = AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1);
@@ -533,6 +557,8 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         private readonly Task refresh;
         private readonly SpeechInputCompletion completion;
         private bool started;
+        /// <summary>PCM bytes pushed to the recognizer so far: 32,000 per second of audio (16 kHz, 16-bit, mono).</summary>
+        private long pushedBytes;
 
         public AzureSpeechStream(SpeechConfig config, TokenCredential credential, string resourceId, IReadOnlyList<string> phrases,
             Action<Transcript> transcript, Action<ProviderException> error, DateTimeOffset tokenExpiresOn)
@@ -549,17 +575,21 @@ public sealed class AzureMeetingProvider : IMeetingProvider
             recognizer.Recognizing += (_, args) =>
             {
                 if (string.IsNullOrWhiteSpace(args.Result.Text)) return;
+                var lag = RecognitionLagMs(Interlocked.Read(ref pushedBytes), args.Result.OffsetInTicks, args.Result.Duration);
                 lock (gate) transcript(new(turn, ++revision, args.Result.Text, false));
+                MeetingMetrics.SpeechRecognitionLag(lag, final: false);
             };
             recognizer.Recognized += (_, args) =>
             {
                 if (args.Result.Reason != ResultReason.RecognizedSpeech || string.IsNullOrWhiteSpace(args.Result.Text)) return;
+                var lag = RecognitionLagMs(Interlocked.Read(ref pushedBytes), args.Result.OffsetInTicks, args.Result.Duration);
                 lock (gate)
                 {
                     transcript(new(turn, ++revision, args.Result.Text, true));
                     turn = Guid.NewGuid().ToString("N");
                     revision = 0;
                 }
+                MeetingMetrics.SpeechRecognitionLag(lag, final: true);
             };
             recognizer.Canceled += (_, args) =>
             {
@@ -594,6 +624,7 @@ public sealed class AzureMeetingProvider : IMeetingProvider
         {
             if (completion.InputEnded) throw new InvalidOperationException("Speech input is complete.");
             input.Write(buffer);
+            Interlocked.Add(ref pushedBytes, buffer.Length);
         }
 
         public Task CompleteInputAsync(CancellationToken cancellation) => completion.CompleteAsync(cancellation);

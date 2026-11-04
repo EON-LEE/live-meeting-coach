@@ -54,6 +54,10 @@ public static class MeetingMetrics
         "Meeting session starts that asked to continue the previous conversation, by outcome: restored, expired or none.");
     private static readonly Histogram<long> ResumedTurns = Distribution("voiceassistant.session.resumed_turns", "{turn}",
         "Finalized turns a resumed meeting session continued with.");
+    private static readonly Counter<long> ChatTokens = Count("voiceassistant.chat.tokens", "{token}",
+        "Live chat tokens by call type (answer, classifier, translation) and type (input, cached, output, reasoning).");
+    private static readonly Histogram<double> RecognitionLag = Milliseconds("voiceassistant.speech.recognition_lag",
+        "Audio pushed to the recognizer minus the end of the recognized audio, when a partial or final arrives.");
     static MeetingMetrics() => Meter.CreateObservableGauge(
         "voiceassistant.sessions.active", () => Volatile.Read(ref activeSessions), "{session}", "Open meeting sessions.");
 
@@ -111,6 +115,23 @@ public static class MeetingMetrics
     public static void ChatThrottledResponse(string operation) => ChatThrottled.Add(1, new KeyValuePair<string, object?>("operation", Bounded(operation)));
 
     public static void ChatRetried(string operation) => ChatRetries.Add(1, new KeyValuePair<string, object?>("operation", Bounded(operation)));
+
+    /// <summary>
+    /// The token usage of one live chat call. Cached tokens are part of the input tokens and reasoning tokens part of the output
+    /// tokens. A streamed answer reports usage only in its last chunk, so a stream that ends early is not counted.
+    /// </summary>
+    public static void ChatTokensUsed(string operation, OpenAI.Chat.ChatTokenUsage? usage)
+    {
+        if (usage is null) return;
+        var call = new KeyValuePair<string, object?>("operation", Bounded(operation));
+        ChatTokens.Add(usage.InputTokenCount, call, new("type", "input"));
+        ChatTokens.Add(usage.InputTokenDetails?.CachedTokenCount ?? 0, call, new("type", "cached"));
+        ChatTokens.Add(usage.OutputTokenCount, call, new("type", "output"));
+        ChatTokens.Add(usage.OutputTokenDetails?.ReasoningTokenCount ?? 0, call, new("type", "reasoning"));
+    }
+
+    public static void SpeechRecognitionLag(double milliseconds, bool final) =>
+        RecognitionLag.Record(milliseconds, new KeyValuePair<string, object?>("kind", final ? "final" : "partial"));
 
     public static void ErrorSent(string code) => Errors.Add(1, new KeyValuePair<string, object?>("code", Bounded(code)));
 

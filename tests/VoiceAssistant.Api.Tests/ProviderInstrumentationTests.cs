@@ -29,6 +29,60 @@ public sealed class ProviderInstrumentationTests
         Assert.Throws<InvalidOperationException>(() => ServiceSettings.ReadChatTokenLimit(config));
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("true", true)]
+    [InlineData("False", false)]
+    public void StreamUsageIsAnOffByDefaultSwitch(string? value, bool expected)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Azure:ChatStreamUsage"] = value, ["Provider:Mode"] = "Fake" }).Build();
+        Assert.Equal(expected, ServiceSettings.Read(config, new Environment()).ChatStreamUsage);
+    }
+
+    [Fact]
+    public void AnInvalidStreamUsageSwitchPreventsStartup()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Azure:ChatStreamUsage"] = "yes", ["Provider:Mode"] = "Fake" }).Build();
+        Assert.Throws<InvalidOperationException>(() => ServiceSettings.Read(config, new Environment()));
+    }
+
+    [Theory]
+    [InlineData(64_000, 1.0, 500, 500)]
+    [InlineData(32_000, 0.2, 800, 0)]
+    [InlineData(48_000, 0, 1200, 300)]
+    public void RecognitionLagIsPushedAudioMinusTheEndOfTheRecognizedAudio(long pushedBytes, double offsetSeconds,
+        int durationMs, double expectedMs)
+    {
+        Assert.Equal(expectedMs, AzureMeetingProvider.RecognitionLagMs(pushedBytes, TimeSpan.FromSeconds(offsetSeconds).Ticks,
+            TimeSpan.FromMilliseconds(durationMs)), precision: 6);
+    }
+
+    [Fact]
+    public void RecognitionLagIsTaggedOnlyByKind()
+    {
+        var values = new List<(string Name, double Value, KeyValuePair<string, object?>[] Tags)>();
+        using var listener = Listen(values);
+        MeetingMetrics.SpeechRecognitionLag(123.25, final: false);
+        MeetingMetrics.SpeechRecognitionLag(987.75, final: true);
+        lock (values)
+        {
+            var lags = values.Where(value => value.Name == "voiceassistant.speech.recognition_lag" && value.Value is 123.25 or 987.75).ToArray();
+            Assert.Equal(2, lags.Length);
+            Assert.Equal([new("kind", "partial")], lags[0].Tags);
+            Assert.Equal([new("kind", "final")], lags[1].Tags);
+        }
+    }
+
+    private sealed class Environment : Microsoft.Extensions.Hosting.IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Development";
+        public string ApplicationName { get; set; } = "test";
+        public string ContentRootPath { get; set; } = "";
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
     [Fact]
     public void PortalHttpsRootIsPreservedByPinnedSpeechSdk()
     {
