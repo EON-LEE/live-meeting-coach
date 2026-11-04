@@ -18,7 +18,8 @@ import { LiveController, liveLimits, type SourceHooks } from "./live-controller.
 import { actionLabels, captureMessage, liveHost, liveMessage, reconnectText, sourceNames, warningMessage, type LiveWarning,
   type PageAction } from "./live-errors.js";
 import { LatencyMarks, debugEnabled } from "./live-latency.js";
-import { $, canFocus, liveDocument, returnFocus, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
+import { createMenu } from "./live-menu.js";
+import { $, liveDocument, returnFocus, setData, setHidden, setLiveDocument, setPressed, setText, setTitle,
   write } from "./live-dom.js";
 
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
@@ -585,82 +586,7 @@ function runAction(action: string): void {
 toggleButton.addEventListener("click", () => runAction(toggleButton.dataset.command === "stop" ? "stop" : "start"));
 pauseButton.addEventListener("click", () => runAction("pause"));
 
-function positionMenu(x: number, y: number): void {
-  const bounds = panel.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, bounds.width - menu.offsetWidth - 4));
-  const top = Math.max(4, Math.min(y, bounds.height - menu.offsetHeight - 4));
-  menu.style.left = `${left}px`; menu.style.top = `${top}px`;
-}
-new ResizeObserver(() => {
-  if (!menu.hidden) positionMenu(parseFloat(menu.style.left), parseFloat(menu.style.top));
-}).observe(panel);
-/** The items that can take focus: enabled and shown (the WebView2 host hides the floating-window item with CSS). */
-function menuItems(): HTMLButtonElement[] {
-  return [...menu.querySelectorAll<HTMLButtonElement>("button")].filter(button => !button.disabled && button.getClientRects().length > 0);
-}
-/** While the menu is open: the element it was opened from, and how to stop listening for what closes it. */
-let openedMenu: { opener: Element | null; release(): void } | undefined;
-function openMenu(x: number, y: number): void {
-  renderControls();
-  menu.hidden = false;
-  const bounds = panel.getBoundingClientRect();
-  positionMenu(x - bounds.left, y - bounds.top);
-  if (!openedMenu) {
-    const owner = panel.ownerDocument, opener = owner.activeElement;
-    const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape") closeMenu(); };
-    const onPointer = (event: PointerEvent): void => {
-      if (menu.contains(event.target as Node)) return;
-      closeMenu();
-      // A click on another control focuses that control; a click on anything else would leave focus nowhere.
-      owner.defaultView?.setTimeout(() => {
-        const active = owner.activeElement;
-        if (menu.hidden && (!active || active === owner.body || active === panel)) returnFocus(panel, opener);
-      });
-    };
-    owner.addEventListener("pointerdown", onPointer, true); owner.addEventListener("keydown", onKey, true);
-    openedMenu = { opener, release: () => {
-      owner.removeEventListener("pointerdown", onPointer, true); owner.removeEventListener("keydown", onKey, true);
-    } };
-  }
-  menuItems()[0]?.focus();
-}
-/** Hides the menu; focus returns to where it was opened from (Escape, a choice or a click outside), unless `refocus` is false. */
-function closeMenu(refocus = true): void {
-  menu.hidden = true;
-  const opened = openedMenu;
-  if (!opened) return;
-  openedMenu = undefined;
-  opened.release();
-  if (refocus) returnFocus(panel, opened.opener);
-}
-// Right-click, or Shift+F10 / the menu key on the focused panel or one of its buttons. Inside the open menu it stays as it is.
-panel.addEventListener("contextmenu", event => {
-  event.preventDefault();
-  if (!menu.contains(event.target as Node)) openMenu(event.clientX, event.clientY);
-});
-menu.addEventListener("keydown", event => {
-  // Tab leaves the menu from where it was opened.
-  if (event.key === "Tab") { closeMenu(); return; }
-  const items = menuItems(), last = items.length - 1;
-  const index = items.indexOf(panel.ownerDocument.activeElement as HTMLButtonElement);
-  const next = event.key === "ArrowDown" ? index < last ? index + 1 : 0
-    : event.key === "ArrowUp" ? index > 0 ? index - 1 : last
-    : event.key === "Home" ? 0 : event.key === "End" ? last : undefined;
-  if (next === undefined) return;
-  event.preventDefault();
-  items[next]?.focus();
-});
-menu.addEventListener("click", event => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button");
-  if (!button) return;
-  const opener = openedMenu?.opener ?? null;
-  // Every item closes the menu; the items LiveCoach.exe adds (opacity, minimize, exit) run their own action.
-  closeMenu();
-  if (button.dataset.action) runAction(button.dataset.action);
-  // A choice can turn off the button the menu was opened from (stop turns off pause): focus then goes to the panel.
-  const focused = panel.ownerDocument.activeElement;
-  if (focused === opener ? !canFocus(panel, opener) : !focused || focused === panel.ownerDocument.body) returnFocus(panel, opener);
-});
+const liveMenu = createMenu({ panel, menu, refresh: renderControls, run: runAction });
 
 // ---------- Settings dialog ----------
 
@@ -733,7 +659,7 @@ async function toggleFloat(): Promise<void> {
   setLiveDocument(floating.document);
   pipWindow = floating;
   floating.addEventListener("pagehide", () => {
-    stage.append(panel); setLiveDocument(document); pipWindow = undefined; closeMenu(false); pending = false; render();
+    stage.append(panel); setLiveDocument(document); pipWindow = undefined; liveMenu.close(false); pending = false; render();
   });
   render();
 }
