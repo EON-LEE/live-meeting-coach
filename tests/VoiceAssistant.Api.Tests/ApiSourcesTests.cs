@@ -11,7 +11,7 @@ public sealed partial class ApiTests
     public void SourcesAreDeduplicatedByUrlThenTitleInEvidenceOrder()
     {
         static Evidence Chunk(string title, string url) => new("Fictional chunk text.", new(title, url, null));
-        var sources = MeetingSession.DistinctSources(
+        var sources = ReplyGeneration.DistinctSources(
         [
             Chunk("Rollout deck", DeckUrl), Chunk("Release notes", "https://example.test/notes"), Chunk("Rollout deck", DeckUrl),
             Chunk("Untitled", ""), Chunk("untitled ", ""), Chunk("Rollout deck", "https://my-materials.invalid/" + new string('b', 32))

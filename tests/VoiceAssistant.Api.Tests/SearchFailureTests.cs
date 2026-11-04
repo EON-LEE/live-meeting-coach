@@ -136,11 +136,11 @@ public sealed class SearchFailureTests
     public void LogLineCarriesOnlyTheContentFreeCause()
     {
         var logger = new ListLogger<MeetingSession>();
-        MeetingSession.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text")
+        ReplyGeneration.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text")
         {
             Retrieval = new("server_error", true, nameof(RequestFailedException), 503, "ServiceUnavailable", true)
         });
-        MeetingSession.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text"));
+        ReplyGeneration.LogRetrievalFailure(logger, new ProviderException("grounding_unavailable", "private query text"));
         var lines = logger.Lines;
         Assert.Equal(2, lines.Count);
         Assert.Equal("Meeting retrieval unavailable: server_error, transient True, RequestFailedException, HTTP status 503, " +
@@ -153,10 +153,10 @@ public sealed class SearchFailureTests
     [Fact]
     public void ResponseFailureLogNeverReportsAMadeUpStatusZero()
     {
-        Assert.Equal("503", MeetingSession.HttpStatusText(new RequestFailedException(503, "private")));
-        Assert.Equal("none", MeetingSession.HttpStatusText(new RequestFailedException("private")));
-        Assert.Equal("none", MeetingSession.HttpStatusText(new ClientResultException("private")));
-        Assert.Equal("none", MeetingSession.HttpStatusText(new ProviderException("grounding_unavailable", "private")));
+        Assert.Equal("503", ReplyGeneration.HttpStatusText(new RequestFailedException(503, "private")));
+        Assert.Equal("none", ReplyGeneration.HttpStatusText(new RequestFailedException("private")));
+        Assert.Equal("none", ReplyGeneration.HttpStatusText(new ClientResultException("private")));
+        Assert.Equal("none", ReplyGeneration.HttpStatusText(new ProviderException("grounding_unavailable", "private")));
     }
 
     [Fact]
