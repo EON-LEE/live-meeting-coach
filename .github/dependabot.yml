@@ -4,7 +4,6 @@ updates:
     directories:
       - "/src/*"
       - "/tests/*"
-      - "/tools/*"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -38,7 +37,6 @@ updates:
   - package-ecosystem: docker
     directories:
       - "/src/VoiceAssistant.Api"
-      - "/tools/VoiceAssistant.LiveProbe"
       - "/infra/private-ingestion"
     schedule:
       interval: weekly
