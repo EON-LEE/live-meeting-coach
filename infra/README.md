@@ -200,6 +200,21 @@ next run.
   time, tokens, embeddings, storage and the registry. Set budget alerts before `-Apply`; **a budget alert is not a
   spending cap.**
 
+### Workbook
+
+With `enableDiagnostics=true` and `deployWorkbook=true` (both default), the template also deploys the Azure Monitor
+workbook "Live Coach telemetry". It charts reply latency, reply outcomes and decisions, token use and reliability
+counters from the content-free metrics, plus per-reply first-line percentiles from the `ReplySummary` console lines.
+To add it to an existing deployment without touching the Container App, deploy `workbook.bicep` alone:
+
+```powershell
+az deployment group create --resource-group <group> --template-file .\infra\workbook.bicep `
+  --parameters appInsightsId=<application-insights-id> logAnalyticsWorkspaceId=<log-analytics-workspace-id>
+```
+
+Histogram tiles show count-weighted percentiles of per-minute means, because the exporter sends no buckets; the log
+tiles give exact per-reply percentiles.
+
 ## Offline tests
 
 ```powershell

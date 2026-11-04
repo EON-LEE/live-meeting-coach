@@ -32,6 +32,15 @@ The pages have separate settings. Do not infer one page's defaults or stored sta
   `resumeConversation:true`; a new Start begins a fresh conversation. Pause sends a silent frame every 20 s.
 - **Failures.** `live-errors.ts` maps error codes to reconnect, rollover, notice or stop (with a Korean recovery
   button). `grounding_unavailable` shows **자료 확인 불가**; `response_filtered` removes the stopped reply.
+- **Auto-hold.** When the server marks a reply `decision:"listen"` (the other person is still talking), the answer on
+  screen stays and the status reads **상대가 말하는 중 · 이전 답변 유지**; the new reply waits behind **새 답변 보기**.
+  The next reply without `listen` ends this hold. A hold the user set (**답변 고정**) is never released automatically.
+- **Feedback.** Under the answers, **좋아요** or **아쉬워요** and a reason (늦음, 틀림, 부족, 읽기 어려움, 불필요, 필요한 답 없음)
+  sends one `response.feedback` per reason and reply. The row appears only when `session.ready` announces `feedback`.
+- **On-screen time.** When `session.ready` announces `viewed`, `live-dwell.ts` reports how long each reply stayed
+  visible (`response.viewed`), at most every 5 s and when the page hides or stops. Nothing is counted while it is hidden.
+- **Start hint.** Before a start with neither a topic nor notes, the **내 메모** chip is highlighted with a one-line
+  example of notes.
 - **LiveCoach audio.** Inside `LiveCoach.exe` the source list adds **Teams 앱 소리** (the default there; Windows build
   20348 or later) and **PC 전체 소리** through `src/host-audio.ts`, with no picker.
 

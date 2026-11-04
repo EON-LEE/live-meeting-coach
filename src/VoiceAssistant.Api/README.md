@@ -57,6 +57,13 @@ on. Startup logs the values in effect (`Live reply switches: ...`).
 | `Azure__SearchMaxEvidence` | 1 to 10 (5) | The most chunks at or above the reranker cutoff that one reply may use |
 | `Azure__AnswerDeployment` | deployment name (unset) | A separate deployment for the live answer only. The template sets it only with `useAnswerDeployment` (off by default) |
 | `Azure__ChatReasoningEffort` | `minimal`, `low`, `medium` (unset) | `reasoning_effort` of the live answer request. A rejected value fails the reply with `response_unavailable`; nothing falls back |
+| `Azure__ChatStreamUsage` | `true`, `false` (`false`) | The live answer asks for `stream_options.include_usage`, so its tokens are counted in `voiceassistant.chat.tokens` |
+| `Azure__ChatServiceTier` | `auto`, `default`, `flex`, `priority`, `scale` (unset) | `service_tier` of the live answer request only |
+| `Azure__ChatPromptCacheKey` | `off`, `static`, `session` (`off`) | `prompt_cache_key` of the live answer: one constant per deployment and prompt version, or a random key per session. Never derived from the user |
+| `Reply__RouteInFocus` | `true`, `false` (`false`) | The answer prompt names the route in its response focus and puts the search-failure instructions after the evidence, so a session's replies share a longer unchanging prefix |
+
+With a switch off, the API sends the request exactly as before. Enable one switch at a time on staging first; a value
+the deployment rejects fails the reply.
 
 ## Runtime behavior
 
@@ -112,7 +119,19 @@ authentication. The cloud role is `OTEL_SERVICE_NAME` (default `voice-web`). Sta
 | `voiceassistant.session.resume` | counter | `outcome=restored\|expired\|none` | Meeting session starts that asked to continue the previous conversation (`resumeConversation`) |
 | `voiceassistant.session.resumed_turns` | histogram (`{turn}`) | none | Finalized turns a resumed session continued with |
 | `voiceassistant.sessions.active` | observable gauge | none | Open meeting sessions |
+| `voiceassistant.chat.tokens` | counter (`{token}`) | `operation=answer\|classifier\|translation`, `type=input\|cached\|output\|reasoning` | Chat tokens; the answer is counted only with `Azure__ChatStreamUsage` |
+| `voiceassistant.speech.recognition_lag` | histogram | `kind=partial\|final` | Audio already sent to the recognizer past the end of the recognized phrase when its result arrives |
+| `voiceassistant.reply.outcomes` | counter | `start_reason=manual\|no_settle\|early_final\|settle\|supersede\|quiet`, `classifier=respond\|listen\|timeout\|failed\|none`, `outcome=completed\|fallback\|cancelled\|error` | Every reply, once, with why it started and how it ended |
+| `voiceassistant.reply.queue_wait` | histogram | reply tags without `grounding` | Queued replies: how long they waited behind an active reply |
+| `voiceassistant.reply.decision` | counter | `decision=respond\|listen\|unknown` | The classifier verdict known when the first line was sent (`decision` on `response.delta`) |
+| `voiceassistant.reply.feedback` | counter | `reason` | `response.feedback` reports from the live page |
+| `voiceassistant.reply.visible` | histogram | none | `response.viewed` reports: how long a reply stayed visible on screen |
 
 Reply tags are `provider=Azure|Fake|TestDouble`, `trigger=automatic|manual`, `route=knowledge|transcript|profile`,
 `response_mode=balanced|grounded|conversation` and `grounding=grounded|no_matches|unavailable|disabled|pending`. Tag
 values come from fixed vocabularies; no content, user ID or URL is a tag. Never mix Fake and Azure measurements.
+
+Each reply also writes one content-free log line, `ReplySummary outcome=... start_reason=... classifier=... decision=...
+waits=... quiet_armed=... queued=... queue_wait_ms=... speculation=... spec_edit=... speech_restarts=... first_line_ms=...`.
+It reaches Log Analytics only when the container app streams console logs (`enableDiagnostics`). The
+[workbook](../../infra/README.md#workbook) charts these metrics.
