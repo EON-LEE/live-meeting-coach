@@ -1,0 +1,10 @@
+<!--
+  Copy to LiveCoach.local.props (git-ignored) and replace the address to build LiveCoach.exe with your deployment's
+  live.html as the default. The url command-line argument, LIVECOACH_URL and LiveCoach.settings.json next to the exe
+  still take precedence at run time. Passing -p:LiveCoachDefaultUrl=... to dotnet build or publish works too.
+-->
+<Project>
+  <PropertyGroup>
+    <LiveCoachDefaultUrl>https://&lt;your-app&gt;.&lt;region&gt;.azurecontainerapps.io/live.html</LiveCoachDefaultUrl>
+  </PropertyGroup>
+</Project>

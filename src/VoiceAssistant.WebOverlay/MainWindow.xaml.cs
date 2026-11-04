@@ -14,9 +14,9 @@ namespace VoiceAssistant.WebOverlay;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const string DefaultUrl = "https://voice-web.gentlesky-d6ba12c8.koreacentral.azurecontainerapps.io/live.html";
     private static readonly double[] Opacities = [0.92, 0.8, 0.65, 0.5];
-    private readonly Uri pageUrl;
+    private readonly OverlayUrlResult pageSetting = OverlayUrl.ResolveForProcess();
+    private readonly Uri? pageUrl;
     private readonly bool fakeMicrophone;
     private readonly string? fakeAudioFile;
     private readonly string dataFolder = Path.Combine(
@@ -29,8 +29,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         var args = Environment.GetCommandLineArgs();
-        var urlIndex = Array.IndexOf(args, "--url");
-        pageUrl = ValidateUrl(urlIndex >= 0 && urlIndex + 1 < args.Length ? args[urlIndex + 1] : DefaultUrl);
+        pageUrl = pageSetting.Url;
         fakeMicrophone = args.Contains("--fake-mic");
         var audioIndex = Array.IndexOf(args, "--audio-file");
         if (audioIndex >= 0 && audioIndex + 1 < args.Length && fakeMicrophone)
@@ -48,21 +47,16 @@ public partial class MainWindow : Window
         if (settings.Left is { } left && settings.Top is { } top && IsOnScreen(left, top)) { Left = left; Top = top; }
         else { Left = SystemParameters.WorkArea.Right - Width - 24; Top = SystemParameters.WorkArea.Top + 24; }
         SourceInitialized += (_, _) => ExcludeFromCapture();
-        Loaded += async (_, _) => await InitializeWebAsync();
+        Loaded += async (_, _) =>
+        {
+            if (pageUrl is { } page) await InitializeWebAsync(page);
+            else ShowMessage(OverlayUrl.SetupMessage(pageSetting));
+        };
         Closing += (_, _) => SaveSettings();
         Closed += (_, _) => hostAudio.Dispose();
     }
 
-    /// <summary>Only HTTPS pages, or plain HTTP on loopback for local development, may be hosted.</summary>
-    internal static Uri ValidateUrl(string value)
-    {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || !string.IsNullOrEmpty(uri.UserInfo) ||
-            !(uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback))
-            throw new ArgumentException("The overlay URL must be HTTPS, or HTTP on localhost for development.");
-        return uri;
-    }
-
-    private async Task InitializeWebAsync()
+    private async Task InitializeWebAsync(Uri page)
     {
         try
         {
@@ -85,7 +79,7 @@ public partial class MainWindow : Window
             core.WebMessageReceived += OnWebMessage;
             // Native Teams/system audio for the page; frames go back only while the trusted page is loaded.
             var bridge = hostAudioBridge = new HostAudioBridge(hostAudio, core.PostWebMessageAsString,
-                () => PageOrigin.Matches(core.Source, pageUrl), action => Dispatcher.BeginInvoke(action));
+                () => PageOrigin.Matches(core.Source, page), action => Dispatcher.BeginInvoke(action));
             core.NavigationStarting += (_, e) =>
             {
                 // The overlay window stays on the meeting page; other sites (sign-in) open in their own popup.
@@ -102,10 +96,10 @@ public partial class MainWindow : Window
                 Loading.Visibility = Visibility.Collapsed;
                 if (!e.IsSuccess) ShowLoadError(e.WebErrorStatus.ToString());
             };
-            await core.AddScriptToExecuteOnDocumentCreatedAsync(ShellScript.Build(pageUrl.GetLeftPart(UriPartial.Authority),
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(ShellScript.Build(page.GetLeftPart(UriPartial.Authority),
                 Opacities[Math.Clamp(settings.OpacityIndex, 0, Opacities.Length - 1)],
                 ProcessLoopbackCapture.IsSupported(Environment.OSVersion.Version) ? ["teams", "system"] : ["system"]));
-            core.Navigate(pageUrl.AbsoluteUri);
+            core.Navigate(page.AbsoluteUri);
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -114,7 +108,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowLoadError(ex.Message); }
     }
 
-    private bool SameOrigin(Uri uri) => PageOrigin.Matches(uri, pageUrl);
+    private bool SameOrigin(Uri uri) => pageUrl is not null && PageOrigin.Matches(uri, pageUrl);
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
     {
@@ -175,10 +169,13 @@ public partial class MainWindow : Window
             System.Diagnostics.Debug.WriteLine($"SetWindowDisplayAffinity failed ({Marshal.GetLastWin32Error()}); the overlay stays capturable.");
     }
 
-    private void ShowLoadError(string detail)
+    private void ShowLoadError(string detail) =>
+        ShowMessage($"Live Coach 화면을 불러오지 못했습니다.\n{detail}\n인터넷 연결을 확인한 뒤 다시 실행하세요.");
+
+    private void ShowMessage(string text)
     {
         Loading.Visibility = Visibility.Visible;
-        Loading.Text = $"Live Coach 화면을 불러오지 못했습니다.\n{detail}\n인터넷 연결을 확인한 뒤 다시 실행하세요.";
+        Loading.Text = text;
         Loading.TextAlignment = TextAlignment.Center;
         Loading.TextWrapping = TextWrapping.Wrap;
         Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(230, 20, 29, 43));
