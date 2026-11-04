@@ -1025,12 +1025,16 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 break;
             case SessionEventKind.Delta when message.Generation == generationNumber && responseActive:
                 var deltaText = (string)message.Value!;
-                // primaryDone marks, once per response, that the first line is complete; only that delta may be empty.
-                await Wire.SendAsync(message.PrimaryDone
-                    ? new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true }
-                    : (object)new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText }, lifetime);
+                // primaryDone marks, once per response, that the first line is complete; only that delta may be empty. It also
+                // carries the classifier's verdict when that was known by then, and nothing when it was not.
+                await Wire.SendAsync(!message.PrimaryDone
+                    ? new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText }
+                    : message.Decision is "respond" or "listen"
+                        ? new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true, decision = message.Decision }
+                        : (object)new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true }, lifetime);
                 if (message.ModelResponse && deltaText.Length > 0) responseMeasurement?.FirstDeltaSent();
                 if (message.ModelResponse && message.PrimaryDone) responseMeasurement?.PrimaryDoneSent();
+                if (message.PrimaryDone && message.Decision is { } decision) responseMeasurement?.DecisionSent(decision);
                 break;
             case SessionEventKind.Complete when message.Generation == generationNumber && responseActive:
                 var completion = (Completion)message.Value!;

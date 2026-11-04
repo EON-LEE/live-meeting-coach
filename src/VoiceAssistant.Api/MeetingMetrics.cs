@@ -56,6 +56,8 @@ public static class MeetingMetrics
         "Finalized turns a resumed meeting session continued with.");
     private static readonly Counter<long> ChatTokens = Count("voiceassistant.chat.tokens", "{token}",
         "Live chat tokens by call type (answer, classifier, translation) and type (input, cached, output, reasoning).");
+    private static readonly Counter<long> Decisions = Count("voiceassistant.reply.decision", "{reply}",
+        "Replies whose primary line ended with the turn classifier's verdict known (respond, listen) or not yet known (unknown).");
     private static readonly Histogram<double> RecognitionLag = Milliseconds("voiceassistant.speech.recognition_lag",
         "Audio pushed to the recognizer minus the end of the recognized audio, when a partial or final arrives.");
     static MeetingMetrics() => Meter.CreateObservableGauge(
@@ -195,6 +197,7 @@ public static class MeetingMetrics
         private int completedRecorded;
         private int primaryRecorded;
         private int tokenRecorded;
+        private int decisionRecorded;
         private long requestSent;
         private volatile string grounding = "pending";
         public string Route { get; init; } = "knowledge";
@@ -306,6 +309,14 @@ public static class MeetingMetrics
             var tags = Tags();
             tags.Add("outcome", Bounded(outcome));
             Record(ClassifierWait, waited.TotalMilliseconds, tags);
+        }
+
+        /// <summary>The primary line ended with this classifier verdict (respond, listen or unknown); counted once per reply.</summary>
+        public void DecisionSent(string decision)
+        {
+            if (!Once(ref decisionRecorded)) return;
+            var value = decision is "respond" or "listen" ? decision : "unknown";
+            Record(() => Decisions.Add(1, new KeyValuePair<string, object?>("decision", value)));
         }
 
         public void KoreanSent(int index, bool translated)

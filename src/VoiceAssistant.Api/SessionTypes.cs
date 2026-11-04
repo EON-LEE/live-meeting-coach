@@ -47,8 +47,12 @@ internal enum SessionEventKind
     Korean, Delta, Complete, GroundingUnavailable, GroundingFallback, GenerationError
 }
 
+/// <param name="Decision">
+/// On the delta that completes the primary line: the turn classifier's verdict at that moment, <c>respond</c> or <c>listen</c>,
+/// or <c>unknown</c> while it was still running or after it failed. Null on routes without a classifier and on other events.
+/// </param>
 internal sealed record SessionEvent(SessionEventKind Kind, object? Value = null, int Generation = 0, long Timestamp = 0, bool ModelResponse = false,
-    bool PrimaryDone = false);
+    bool PrimaryDone = false, string? Decision = null);
 internal sealed record AudioMessage(byte[] Bytes);
 internal sealed record WireMessage(byte[] Bytes, WebSocketMessageType Type);
 internal sealed record Completion(string Text, string[] Suggestions, Source[] Sources, string Grounding, string ResponseRoute, bool RetrievalPrefetched, bool RespondNow = false);

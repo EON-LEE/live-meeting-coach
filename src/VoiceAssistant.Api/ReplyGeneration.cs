@@ -82,13 +82,15 @@ internal sealed class ReplyGeneration(IMeetingProvider provider, string objectId
                 var primaryDone = update.PrimaryDone && !primaryDoneSent && text.Length > 0;
                 primaryDoneSent |= primaryDone;
                 if (delta.Length > 0 || primaryDone)
-                    await output.WriteAsync(new(SessionEventKind.Delta, delta, ModelResponse: modelResponse, PrimaryDone: primaryDone), cancellation);
+                    await output.WriteAsync(new(SessionEventKind.Delta, delta, ModelResponse: modelResponse, PrimaryDone: primaryDone,
+                        Decision: primaryDone ? Decision(turnSignal) : null), cancellation);
             }
             cancellation.ThrowIfCancellationRequested();
             if (text.Length == 0) throw new ProviderException("empty_response", "The model returned no text. Please retry.");
             // A single-line reply is known to be complete only when the stream ends.
             if (!primaryDoneSent)
-                await output.WriteAsync(new(SessionEventKind.Delta, "", ModelResponse: modelResponse, PrimaryDone: true), cancellation);
+                await output.WriteAsync(new(SessionEventKind.Delta, "", ModelResponse: modelResponse, PrimaryDone: true,
+                    Decision: Decision(turnSignal)), cancellation);
             var suggestions = ReplySuggestions.Complete(text.ToString(), alternative);
             // Translation starts only once the stream has ended normally: with asynchronous content filtering a line is not
             // checked before then, and a reply the filter stops (response_filtered) must never reach the translation call.
@@ -230,4 +232,11 @@ internal sealed class ReplyGeneration(IMeetingProvider provider, string objectId
         catch (TimeoutException) { return (false, "timeout", null); }
         catch (Exception exception) { return (false, "failed", exception); }
     }
+
+    /// <summary>
+    /// The classifier's verdict as the primary line ends, without waiting for it: <c>respond</c> or <c>listen</c> once it has
+    /// succeeded, <c>unknown</c> while it still runs or after it failed.
+    /// </summary>
+    internal static string Decision(Task<bool> signal) =>
+        signal.IsCompletedSuccessfully ? signal.Result ? "respond" : "listen" : "unknown";
 }
