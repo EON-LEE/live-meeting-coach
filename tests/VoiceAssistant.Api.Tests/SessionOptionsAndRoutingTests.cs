@@ -221,7 +221,7 @@ public sealed class SessionOptionsAndRoutingTests
     [Theory]
     [MemberData(nameof(InvalidOptions))]
     public void InvalidOptionsFailHandshake(string options) =>
-        Assert.False(MeetingSession.IsValidStart(Encoding.UTF8.GetBytes(
+        Assert.False(SessionWire.IsValidStart(Encoding.UTF8.GetBytes(
             """{"type":"session.start","protocolVersion":1,"audio":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1},"options":""" + options + "}")));
 
     [Theory]

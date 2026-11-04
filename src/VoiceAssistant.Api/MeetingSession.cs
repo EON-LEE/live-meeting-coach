@@ -8,7 +8,6 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     int maxSessionMinutes = 30, TimeProvider? timeProvider = null, MeetingFeatures? meetingFeatures = null,
     ResumableConversations? resumable = null)
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly MeetingFeatures features = meetingFeatures ?? MeetingFeatures.Off;
     // Session duration, settle timers and reply timing all use this clock, so tests can drive them without sleeping.
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
@@ -59,6 +58,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     private bool retrievalPrefetched;
     private readonly List<Task> retired = [];
     private KoreanScope? koreanScope;
+    /// <summary>The protocol socket; stateless, so creating it on first use from any thread is safe.</summary>
+    private SessionWire Wire => field ??= new(socket, logger);
     /// <summary>Generates this session's replies; created on first use from the session's provider, user and clock.</summary>
     private ReplyGeneration Replies => field ??= new(provider, objectId, logger, clock);
     /// <summary>How long one reply may take, retrieval and model included (the protocol's response deadline).</summary>
@@ -89,8 +90,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         {
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             startup.CancelAfter(TimeSpan.FromSeconds(15));
-            var start = await ReceiveAsync(startup.Token, 32768);
-            if (start is null || start.Type != WebSocketMessageType.Text || !IsValidStart(start.Bytes))
+            var start = await Wire.ReceiveAsync(startup.Token, 32768);
+            if (start is null || start.Type != WebSocketMessageType.Text || !SessionWire.IsValidStart(start.Bytes))
                 throw new ProviderException("invalid_start", "First message must be protocol v1 session.start with PCM16LE 16 kHz mono audio.");
             using (var json = JsonDocument.Parse(start.Bytes))
                 options = json.RootElement.TryGetProperty("options", out var input) ? SessionOptions.Parse(input) : SessionOptions.Legacy;
@@ -111,9 +112,9 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             if (options.ReplyKorean) ready["replyKorean"] = true;
             if (!options.TranscribeOnly) ready["sessionUpdate"] = true;
             if (resumedTurns > 0) ready["resumedTurns"] = resumedTurns;
-            await SendAsync(ready, lifetime.Token);
+            await Wire.SendAsync(ready, lifetime.Token);
             // Cancelling a pending ReceiveAsync aborts the socket; retain it until the fatal time-limit event is sent.
-            receiver = ReceiveLoopAsync(receiving.Token);
+            receiver = Wire.ReceiveLoopAsync(events.Writer, IdleTimeout, receiving.Token);
             await foreach (var message in events.Reader.ReadAllAsync(lifetime.Token))
             {
                 switch (message.Kind)
@@ -126,7 +127,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         var transcript = (Transcript)message.Value!;
                         if (transcript.Text.Length > 8000)
                             throw new ProviderException("transcript_limit", "Utterance is too long. Reconnect and use shorter utterances.");
-                        await SendAsync(new
+                        await Wire.SendAsync(new
                         {
                             type = transcript.Final ? "transcript.final" : "transcript.partial",
                             turnId = transcript.TurnId,
@@ -237,8 +238,8 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         break;
                     }
                     case SessionEventKind.ResponseRequest:
-                        if (options.TranscribeOnly) await ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
-                        else if (lastTurn is null) await ErrorAsync("no_transcript", "Wait for a finalized utterance.", true, lifetime.Token);
+                        if (options.TranscribeOnly) await Wire.ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
+                        else if (lastTurn is null) await Wire.ErrorAsync("no_transcript", "Wait for a finalized utterance.", true, lifetime.Token);
                         else
                         {
                             pendingSpeech.Clear(); settleNumber++; earlyReply = null;
@@ -255,7 +256,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                     case SessionEventKind.SessionUpdate:
                         if (options.TranscribeOnly)
                         {
-                            await ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
+                            await Wire.ErrorAsync("transcribe_only", "This session only transcribes speech.", false, lifetime.Token);
                             break;
                         }
                         // A speculative reply was prepared with the earlier settings, so it is dropped (speculative start).
@@ -265,7 +266,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                         options = options.Apply((SessionUpdate)message.Value!);
                         prefetch?.UpdateOptions(options);
                         // Only whether notes are set: their text is never sent back.
-                        await SendAsync(new
+                        await Wire.SendAsync(new
                         {
                             type = "session.updated", responseMode = options.ResponseMode, replyKorean = options.ReplyKorean,
                             replyOn = options.ReplyOn, notes = options.Notes.Length > 0
@@ -313,7 +314,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 endReason = "superseded";
                 logger.LogWarning("Meeting session superseded by a newer session of the same user.");
                 // Not retryable: otherwise two clients of the same user would keep replacing each other.
-                await TryErrorAsync("session_superseded",
+                await Wire.TryErrorAsync("session_superseded",
                     "Live started in another window or device, so this session was closed.", retryable: false);
             }
             else
@@ -322,7 +323,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                     requestAborted.IsCancellationRequested ? "aborted" : "ended";
                 if (requestAborted.IsCancellationRequested)
                     logger.LogWarning("Meeting session ended: connection aborted.");
-                await TryErrorAsync(overflow != 0 ? "session_overloaded" : duration.IsCancellationRequested ? "session_time_limit" : "session_ended",
+                await Wire.TryErrorAsync(overflow != 0 ? "session_overloaded" : duration.IsCancellationRequested ? "session_time_limit" : "session_ended",
                     overflow != 0 ? "Session could not keep up. Reconnect." :
                     duration.IsCancellationRequested ? "Session reached its time limit. Start a new session to continue." : "Session ended.",
                     retryable: !duration.IsCancellationRequested);
@@ -331,12 +332,12 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         catch (OperationCanceledException)
         {
             endReason = "startup_timeout";
-            await TryErrorAsync("startup_timeout", "Session startup timed out. Reconnect.");
+            await Wire.TryErrorAsync("startup_timeout", "Session startup timed out. Reconnect.");
         }
         catch (ProviderException exception)
         {
             endReason = exception.Code;
-            await TryErrorAsync(exception.Code, exception.Message);
+            await Wire.TryErrorAsync(exception.Code, exception.Message);
         }
         catch (WebSocketException)
         {
@@ -348,7 +349,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
             endReason = "provider_unavailable";
             // The type name says what failed; the message could contain meeting content, so it is never logged.
             logger.LogWarning("Meeting provider failed with {ExceptionType}; sensitive error detail suppressed.", exception.GetType().Name);
-            await TryErrorAsync("provider_unavailable", "The meeting provider is unavailable. Reconnect.");
+            await Wire.TryErrorAsync("provider_unavailable", "The meeting provider is unavailable. Reconnect.");
         }
         finally
         {
@@ -833,7 +834,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var number = ++generationNumber;
         MeetingMetrics.Speculation("adopted", MeetingMetrics.ProviderMode(provider), adopted.Route, adopted.Settings.ResponseMode,
             headStart: clock.GetElapsedTime(adopted.StartedAt, lastFinalTimestamp));
-        await SendAsync(new { type = "response.started", responseId, turnId = responseTurn, segments = Segments(adopted.History) }, lifetime);
+        await Wire.SendAsync(new { type = "response.started", responseId, turnId = responseTurn, segments = Segments(adopted.History) }, lifetime);
         retired.RemoveAll(task => task.IsCompletedSuccessfully);
         if (retired.Count > 8) throw new ProviderException("response_overload", "Too many pending responses. Reconnect.");
         earlyReply = (number, segments);
@@ -857,101 +858,6 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         _ = dropped.Task.ContinueWith(_ => dropped.Cancellation.Dispose(), CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         MeetingMetrics.Speculation("discarded", MeetingMetrics.ProviderMode(provider), dropped.Route, dropped.Settings.ResponseMode, reason);
-    }
-
-    private async Task ReceiveLoopAsync(CancellationToken cancellation)
-    {
-        try
-        {
-            var audioBudget = 128000d;
-            var previous = System.Diagnostics.Stopwatch.GetTimestamp();
-            var commands = 0;
-            var window = DateTime.UtcNow;
-            while (!cancellation.IsCancellationRequested)
-            {
-                using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                idle.CancelAfter(IdleTimeout);
-                var message = await ReceiveAsync(idle.Token);
-                if (message is null) { await events.Writer.WriteAsync(new(SessionEventKind.Closed), cancellation); return; }
-                if (message.Type == WebSocketMessageType.Binary)
-                {
-                    var now = System.Diagnostics.Stopwatch.GetTimestamp();
-                    audioBudget = Math.Min(128000, audioBudget + System.Diagnostics.Stopwatch.GetElapsedTime(previous, now).TotalSeconds * 64000);
-                    previous = now;
-                    audioBudget -= message.Bytes.Length;
-                    if (message.Bytes.Length == 0 || message.Bytes.Length % 2 != 0 || audioBudget < 0)
-                        throw new ProviderException("invalid_audio", "Audio must be bounded, even-length PCM16LE at real-time speed.");
-                    await events.Writer.WriteAsync(new(SessionEventKind.Audio, new AudioMessage(message.Bytes)), cancellation);
-                }
-                else
-                {
-                    if (DateTime.UtcNow - window > TimeSpan.FromSeconds(1)) { window = DateTime.UtcNow; commands = 0; }
-                    if (++commands > 10) throw new ProviderException("command_limit", "Too many commands.");
-                    var command = ParseCommand(message.Bytes);
-                    await events.Writer.WriteAsync(new(command.Kind, command.Update), cancellation);
-                    if (command.Kind == SessionEventKind.SessionStop) return;
-                }
-            }
-        }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        catch (OperationCanceledException) { await events.Writer.WriteAsync(new(SessionEventKind.Fatal, new ProviderException("idle_timeout", "Session idle timeout.")), cancellation); }
-        catch (ProviderException exception) { await events.Writer.WriteAsync(new(SessionEventKind.Fatal, exception), cancellation); }
-        catch (WebSocketException) { await events.Writer.WriteAsync(new(SessionEventKind.Closed), cancellation); }
-    }
-
-    public static bool IsValidStart(byte[] bytes)
-    {
-        try
-        {
-            using var json = JsonDocument.Parse(bytes);
-            var root = json.RootElement;
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("options", out var options))
-                SessionOptions.Parse(options);
-            return root.ValueKind == JsonValueKind.Object && root.GetProperty("type").GetString() == "session.start" &&
-                root.GetProperty("protocolVersion").GetInt32() == 1 &&
-                root.GetProperty("audio").GetProperty("encoding").GetString() == "pcm_s16le" &&
-                root.GetProperty("audio").GetProperty("sampleRate").GetInt32() == 16000 &&
-                root.GetProperty("audio").GetProperty("channels").GetInt32() == 1;
-        }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
-        { return false; }
-    }
-
-    private static Command ParseCommand(byte[] bytes)
-    {
-        try
-        {
-            using var json = JsonDocument.Parse(bytes);
-            var kind = json.RootElement.GetProperty("type").GetString() switch
-            {
-                "response.request" => SessionEventKind.ResponseRequest,
-                "response.cancel" => SessionEventKind.ResponseCancel,
-                "session.stop" => SessionEventKind.SessionStop,
-                "session.update" => SessionEventKind.SessionUpdate,
-                _ => throw new ProviderException("invalid_command", "Unsupported command.")
-            };
-            return kind == SessionEventKind.SessionUpdate
-                ? new(kind, SessionOptions.ParseUpdate(json.RootElement.GetProperty("options")))
-                : new(kind);
-        }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
-        { throw new ProviderException("invalid_command", "Command must be a JSON object with a supported type and valid options."); }
-    }
-
-    private async Task<WireMessage?> ReceiveAsync(CancellationToken cancellation, int textLimit = 4096)
-    {
-        var buffer = new byte[8192];
-        using var data = new MemoryStream();
-        WebSocketReceiveResult result;
-        do
-        {
-            result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellation);
-            if (result.MessageType == WebSocketMessageType.Close) return null;
-            var limit = result.MessageType == WebSocketMessageType.Text ? textLimit : 32768;
-            if (data.Length + result.Count > limit) throw new ProviderException("message_limit", "Message exceeds size limit.");
-            data.Write(buffer, 0, result.Count);
-        } while (!result.EndOfMessage);
-        return new(data.ToArray(), result.MessageType);
     }
 
     /// <summary>Queues a reply to the latest gathered speech behind the active reply, replacing any reply queued before it.</summary>
@@ -987,7 +893,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
     {
         // Korean started for a reply that failed after its stream ended must not arrive for text the client no longer shows.
         if (koreanScope is not null) koreanScope.Abandoned = true;
-        await SendAsync(new
+        await Wire.SendAsync(new
         {
             type = "response.completed",
             responseId,
@@ -1001,7 +907,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         }, cancellation);
         // This fixed notice is not translated server-side; tell the client so it does not wait for it.
         if (koreanScope is not null)
-            await SendAsync(new { type = "response.korean", responseId, turnId = responseTurn, index = 0, failed = true }, cancellation);
+            await Wire.SendAsync(new { type = "response.korean", responseId, turnId = responseTurn, index = 0, failed = true }, cancellation);
         responseMeasurement?.ReplyCompleted("unavailable");
         responseActive = false;
     }
@@ -1070,7 +976,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         var output = new ReplyOutput(events.Writer, number);
         var scope = settings.ReplyKorean ? new KoreanScope(responseId, responseTurn, output, measurement) : null;
         koreanScope = scope;
-        await SendAsync(new { type = "response.started", responseId, turnId = responseTurn, segments = Segments(history) }, lifetime);
+        await Wire.SendAsync(new { type = "response.started", responseId, turnId = responseTurn, segments = Segments(history) }, lifetime);
         if (!generationTask.IsCompleted) retired.Add(generationTask);
         retired.RemoveAll(task => task.IsCompletedSuccessfully);
         if (retired.Count > 8) throw new ProviderException("response_overload", "Too many pending responses. Reconnect.");
@@ -1096,7 +1002,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
         if (koreanScope is not null) koreanScope.Abandoned = true;
         responseActive = false;
         responseMeasurement = null;
-        await SendAsync(new { type = "response.cancelled", responseId, turnId = responseTurn }, cancellation);
+        await Wire.SendAsync(new { type = "response.cancelled", responseId, turnId = responseTurn }, cancellation);
     }
 
     /// <summary>
@@ -1114,13 +1020,13 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 object koreanMessage = line.Korean is { } meaning
                     ? new { type = "response.korean", responseId = line.Scope.ResponseId, turnId = line.Scope.TurnId, index = line.Index, korean = meaning }
                     : new { type = "response.korean", responseId = line.Scope.ResponseId, turnId = line.Scope.TurnId, index = line.Index, failed = true };
-                await SendAsync(koreanMessage, lifetime);
+                await Wire.SendAsync(koreanMessage, lifetime);
                 line.Scope.Measurement?.KoreanSent(line.Index, line.Korean is not null);
                 break;
             case SessionEventKind.Delta when message.Generation == generationNumber && responseActive:
                 var deltaText = (string)message.Value!;
                 // primaryDone marks, once per response, that the first line is complete; only that delta may be empty.
-                await SendAsync(message.PrimaryDone
+                await Wire.SendAsync(message.PrimaryDone
                     ? new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText, primaryDone = true }
                     : (object)new { type = "response.delta", responseId, turnId = responseTurn, text = deltaText }, lifetime);
                 if (message.ModelResponse && deltaText.Length > 0) responseMeasurement?.FirstDeltaSent();
@@ -1128,7 +1034,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 break;
             case SessionEventKind.Complete when message.Generation == generationNumber && responseActive:
                 var completion = (Completion)message.Value!;
-                await SendAsync(new
+                await Wire.SendAsync(new
                 {
                     type = "response.completed",
                     responseId,
@@ -1148,7 +1054,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 break;
             case SessionEventKind.GroundingUnavailable when message.Generation == generationNumber && responseActive:
                 // Non-fatal and sent before the general reply, so older clients still learn why it is not document-based.
-                await ErrorAsync("grounding_unavailable", GroundingUnavailableMessage, true, lifetime);
+                await Wire.ErrorAsync("grounding_unavailable", GroundingUnavailableMessage, true, lifetime);
                 break;
             case SessionEventKind.GroundingFallback when message.Generation == generationNumber && responseActive:
                 await CompleteWithoutGroundingAsync(lifetime);
@@ -1156,7 +1062,7 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 break;
             case SessionEventKind.GenerationError when message.Generation == generationNumber && responseActive:
                 var failure = (ProviderException)message.Value!;
-                await ErrorAsync(failure.Code, failure.Message, true, lifetime);
+                await Wire.ErrorAsync(failure.Code, failure.Message, true, lifetime);
                 if (failure.Code == "grounding_unavailable")
                     await CompleteWithoutGroundingAsync(lifetime);
                 else
@@ -1169,25 +1075,5 @@ public sealed class MeetingSession(WebSocket socket, IMeetingProvider provider, 
                 await StartPendingResponseAsync(lifetime);
                 break;
         }
-    }
-
-    private async Task SendAsync(object value, CancellationToken cancellation)
-    {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(value, Json), WebSocketMessageType.Text, true, timeout.Token);
-    }
-    private Task ErrorAsync(string code, string message, bool retryable, CancellationToken cancellation)
-    {
-        MeetingMetrics.ErrorSent(code);
-        return SendAsync(new { type = "error", code, message, retryable }, cancellation);
-    }
-    private async Task TryErrorAsync(string code, string message, bool retryable = true)
-    {
-        if (socket.State != WebSocketState.Open) return;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        try { await ErrorAsync(code, message, retryable, timeout.Token); }
-        catch (Exception exception) when (exception is WebSocketException or OperationCanceledException)
-        { logger.LogInformation("Meeting error could not be delivered to disconnected client."); }
     }
 }
