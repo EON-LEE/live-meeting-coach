@@ -1,7 +1,7 @@
 """Percentiles and question-level (cluster) bootstrap confidence intervals.
 
 Runs of the same item are correlated (same question, different accent/repeat), so intervals resample whole items
-with replacement. Like tools/MeetingBenchmark, p50 is withheld below 5 samples and p95 below 20.
+with replacement. p50 is withheld below 5 samples and p95 below 20.
 """
 
 from __future__ import annotations
