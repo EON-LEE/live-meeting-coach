@@ -1,6 +1,6 @@
 import type { ServerEvent, Source, Grounding, ResponseRoute } from "./protocol.js";
 
-export interface Turn { id: string; revision: number; text: string; final: boolean }
+interface Turn { id: string; revision: number; text: string; final: boolean }
 export interface Reply { id: string; turnId: string; text: string; complete: boolean; sources: Source[]; grounding?: Grounding; responseRoute?: ResponseRoute; retrievalPrefetched?: boolean }
 
 export class ReplyState {

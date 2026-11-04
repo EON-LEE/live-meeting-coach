@@ -1,6 +1,7 @@
 import { isHostSource, type AudioSource, type CaptureSourceKind } from "./capture.js";
 import { audioFrameBytes } from "./audio-limits.js";
 import { CodedError } from "./errors.js";
+import { validateFeedback, validateViewed, type FeedbackReason, type ViewedItem } from "./feedback.js";
 import { classifyError, classifyServerError, type Classified, type LiveWarning, type SourceWarning } from "./live-errors.js";
 import { createStartMessage, validateUpdate, type SessionOptions, type SessionUpdate } from "./options.js";
 import type { ServerEvent } from "./protocol.js";
@@ -23,7 +24,7 @@ export interface SourceHooks {
   warning(kind: SourceWarning | null, detail?: string): void;
   stall(frames: number): void;
 }
-export interface LiveControllerDeps {
+interface LiveControllerDeps {
   /** Called from `start()`, which runs inside the user's click, and from `switchSource()`. */
   createSource(kind: CaptureSourceKind, hooks: SourceHooks): AudioSource;
   createTransport(): Transport;
@@ -67,14 +68,14 @@ export const liveLimits = {
   pumpMs: 20,
 } as const;
 
-export type LivePhase = "idle" | "starting" | "connecting" | "live" | "reconnecting" | "stopped";
+type LivePhase = "idle" | "starting" | "connecting" | "live" | "reconnecting" | "stopped";
 
-export const browserClock: LiveClock = {
+const browserClock: LiveClock = {
   now: () => performance.now(),
   setTimeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
-export const browserNetwork: LiveNetwork = {
+const browserNetwork: LiveNetwork = {
   online: () => typeof navigator === "undefined" || navigator.onLine !== false,
   onOnline: listener => { addEventListener("online", listener); return () => removeEventListener("online", listener); },
 };
@@ -141,6 +142,10 @@ export class LiveController {
   private connection: AbortController | undefined;
   private generation = 0;
   private ready = false;
+  /** The ready connection's server accepts `response.feedback`. */
+  private feedbackOn = false;
+  /** The ready connection's server accepts `response.viewed`. */
+  private viewedOn = false;
   private readyAt: number | undefined;
   /**
    * A connection of this live session was ready before, so the next one reconnects or rolls over the same conversation and
@@ -174,6 +179,10 @@ export class LiveController {
     return this.phase === "starting" || this.phase === "connecting" || this.phase === "live" || this.phase === "reconnecting";
   }
   get isReady(): boolean { return this.ready; }
+  /** One-tap feedback can be sent: the connection is ready and its server announced `feedback`. */
+  get canFeedback(): boolean { return this.ready && this.feedbackOn; }
+  /** On-screen times can be reported: the connection is ready and its server announced `viewed`. */
+  get canReport(): boolean { return this.ready && this.viewedOn; }
   /** The picker or permission prompt is done and audio is being captured. */
   get isCapturing(): boolean { return this.capturing; }
   /** The connection waits for an interactive sign-in; `resume()` continues with the same audio. */
@@ -295,6 +304,25 @@ export class LiveController {
     this.command({ type: "session.update", options });
   }
 
+  /**
+   * One-tap feedback on a reply, only to a server whose `session.ready` said `feedback`: an older server ends the session on a
+   * command it does not know. Returns whether it was sent.
+   */
+  feedback(responseId: string, reason: FeedbackReason): boolean {
+    const command = validateFeedback(responseId, reason);
+    if (!this.canFeedback) return false;
+    this.command(command);
+    return true;
+  }
+
+  /** How long replies stayed on screen, only to a server whose `session.ready` said `viewed`. Returns whether it was sent. */
+  report(items: readonly ViewedItem[]): boolean {
+    const command = validateViewed(items);
+    if (!this.canReport) return false;
+    this.command(command);
+    return true;
+  }
+
   private command(message: object): void {
     const transport = this.transport;
     if (!this.ready || !transport) return;
@@ -367,7 +395,7 @@ export class LiveController {
     catch { this.halt({ code: "invalid_options", disposition: "fatal", action: "restart" }); return; }
     const transport = this.transport = this.deps.createTransport();
     const connection = this.connection = new AbortController();
-    this.ready = false;
+    this.ready = this.feedbackOn = this.viewedOn = false;
     this.closing = undefined;
     if (this.phase !== "reconnecting") this.setPhase("connecting");
     transport.connect(event => this.receive(generation, event), error => this.lost(generation, error), connection.signal).then(() => {
@@ -394,6 +422,8 @@ export class LiveController {
       }
       this.clearTimer("handshake");
       this.ready = this.resumable = true;
+      this.feedbackOn = event.feedback === true;
+      this.viewedOn = event.viewed === true;
       this.readyAt = this.refilledAt = this.lastSentAt = this.clock.now();
       this.tokens = liveLimits.burstBytes;
       this.offline = this.rollingOver = false;

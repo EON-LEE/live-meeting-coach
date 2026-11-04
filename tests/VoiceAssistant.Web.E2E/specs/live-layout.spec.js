@@ -63,7 +63,7 @@ async function fixture(page, native, expanded = true, settings = everything) {
   }, { english, korean, token, expanded });
 }
 
-async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, settings = everything } = {}) {
+async function meetingFixture(page, { replyKorean = false, sessionUpdate = false, feedback = false, viewed = false, settings = everything } = {}) {
   const commands = [];
   const translations = [];
   await page.route('**/api/client-config', route => route.fulfill({
@@ -96,7 +96,8 @@ async function meetingFixture(page, { replyKorean = false, sessionUpdate = false
         effective = { responseMode: command.options.responseMode, replyKorean: command.options.replyKorean === true,
           replyOn: command.options.replyOn ?? 'all', notes: command.options.notes ?? '' };
         ws.send(JSON.stringify({ type: 'session.ready', ...(replyKorean ? { protocolVersion: 1, replyKorean: true } : {}),
-          ...(sessionUpdate ? { sessionUpdate: true } : {}) }));
+          ...(sessionUpdate ? { sessionUpdate: true } : {}), ...(feedback ? { feedback: true } : {}),
+          ...(viewed ? { viewed: true } : {}) }));
       }
       if (command.type === 'session.update' && sessionUpdate) {
         effective = { ...effective, ...command.options };
@@ -277,6 +278,107 @@ test('Korean that the server never pushes is translated by the client after a sh
   expect(replyRequests(ws).map(item => item.text).sort()).toEqual(['Could we check that together?', 'We should check the plan.']);
 });
 
+test('one-tap feedback sits quietly under the answers: only with a reply and a server that accepts it, each reason once', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 400 });
+  const ws = await meetingFixture(page, { feedback: true });
+  const row = page.locator('#feedback'), good = row.getByRole('button', { name: '좋아요' }), late = row.getByRole('button', { name: '늦음' });
+  const sent = () => ws.commands.filter(command => command.type === 'response.feedback');
+  await expect(row).toBeHidden();
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await expect(row).toBeVisible();
+  await expect(page.locator('#feedback-reasons')).toBeHidden();
+  // Below both answers, text-only buttons, smaller than every answer line.
+  expect(await page.evaluate(() => document.querySelector('#alternative-card').nextElementSibling === document.querySelector('#feedback'))).toBe(true);
+  expect(await row.locator('button').evaluateAll(buttons => buttons.every(button => button.children.length === 0))).toBe(true);
+  const size = selector => page.locator(selector).evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+  expect(await size('#feedback-more')).toBeLessThan(await size('#answer-korean'));
+  await good.scrollIntoViewIfNeeded();
+  await good.click();
+  await expect(good).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#feedback-note')).toHaveText('보냈어요 · 고마워요');
+  await good.click();
+  // The reasons open from the keyboard too, and the chosen one stays pressed.
+  await page.locator('#feedback-more').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#feedback-more')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('#feedback-reasons')).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(late).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(late).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(sent).toEqual([{ type: 'response.feedback', responseId: 'r1', reason: 'good' },
+    { type: 'response.feedback', responseId: 'r1', reason: 'late' }]);
+  expect(await page.evaluate(() => [...document.querySelectorAll('.live-answers, #feedback')]
+    .filter(el => el.scrollWidth > el.clientWidth + 1).length + Number(document.documentElement.scrollWidth > innerWidth + 1))).toBe(0);
+  // The next reply starts closed and unpressed.
+  reply(ws, 2, 'And the risks?', 'The main risk is the data migration.');
+  await expect(page.locator('#answer-text')).toHaveText('The main risk is the data migration.');
+  await expect(good).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#feedback-reasons')).toBeHidden();
+  await expect(page.locator('#feedback-note')).toHaveText('');
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(row).toBeHidden();
+  expect(sent()).toHaveLength(2);
+});
+
+test('a server that does not announce feedback never gets the row or the command', async ({ page }) => {
+  const ws = await meetingFixture(page);
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await expect(page.locator('#feedback')).toBeHidden();
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(page.locator('#capture-status')).toContainText('꺼짐');
+  expect(ws.commands.map(command => command.type).filter(type => /^response\.(feedback|viewed)$/.test(type))).toEqual([]);
+  expect(ws.commands.at(-1).type).toBe('session.stop');
+});
+
+test('on-screen times go only to a server that asked: ids and whole milliseconds, while visible, sent before the stop', async ({ page }) => {
+  const ws = await meetingFixture(page, { viewed: true });
+  const viewed = () => ws.commands.filter(command => command.type === 'response.viewed');
+  const totals = () => viewed().flatMap(command => command.items)
+    .reduce((sum, item) => ({ ...sum, [item.responseId]: (sum[item.responseId] ?? 0) + item.visibleMs }), {});
+  const visibility = state => page.evaluate(hidden => {
+    if (hidden) Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    else delete document.visibilityState;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state === 'hidden');
+  reply(ws, 1, 'Which plan should we pick?', 'Plan B fits the budget.');
+  await expect(page.locator('#answer-text')).toHaveText('Plan B fits the budget.');
+  await page.waitForTimeout(300);
+  reply(ws, 2, 'And the risks?', 'The main risk is the data migration.');
+  await expect(page.locator('#answer-text')).toHaveText('The main risk is the data migration.');
+  await page.waitForTimeout(300);
+  // Hidden: everything seen so far goes out at once, then nothing counts until the panel shows again.
+  await visibility('hidden');
+  await expect.poll(() => Object.keys(totals()).sort()).toEqual(['r1', 'r2']);
+  const hidden = totals(), sent = viewed().length;
+  expect(hidden.r1).toBeGreaterThanOrEqual(250);
+  expect(hidden.r2).toBeGreaterThanOrEqual(250);
+  for (const command of viewed()) {
+    expect(Object.keys(command).sort()).toEqual(['items', 'type']);
+    for (const item of command.items) {
+      expect(Object.keys(item).sort()).toEqual(['responseId', 'visibleMs']);
+      expect(Number.isInteger(item.visibleMs)).toBe(true);
+    }
+  }
+  await page.waitForTimeout(400);
+  expect(viewed()).toHaveLength(sent);
+  await visibility('visible');
+  await page.waitForTimeout(300);
+  await page.locator('#live-panel').dispatchEvent('contextmenu', { clientX: 10, clientY: 10 });
+  await page.locator('[data-action="stop"]').click();
+  await expect(page.locator('#capture-status')).toContainText('꺼짐');
+  const types = ws.commands.map(command => command.type);
+  expect(types.lastIndexOf('response.viewed')).toBe(types.indexOf('session.stop') - 1);
+  expect(viewed().at(-1).items.map(item => item.responseId)).toEqual(['r2']);
+  expect(totals().r1).toBe(hidden.r1);
+  expect(totals().r2 - hidden.r2).toBeGreaterThanOrEqual(250);
+  expect(ws.commands.some(command => command.type === 'response.feedback')).toBe(false);
+});
+
 test('a server that does not announce the push gets no waiting: the client translates the reply at once', async ({ page }) => {
   const ws = await meetingFixture(page);
   expect(ws.commands.find(command => command.type === 'session.start').options.replyKorean).toBe(true);
@@ -296,6 +398,7 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#reading-status')).toContainText('답변 준비 중');
   await expect(page.locator('#answer-text')).not.toContainText('Incomplete draft');
   await expect(page.locator('#hold-answer')).toBeDisabled();
+  await expect(page.locator('#hold-answer')).toHaveText('답변 고정');
   ws.send({ type: 'response.completed', turnId: 't1', responseId: 'r1',
     text: 'Review the dependencies first.', sources: [], grounding: 'no_matches' });
   await expect(page.locator('#answer-text')).toHaveText('Review the dependencies first.');
@@ -304,10 +407,12 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#grounding-badge')).toBeVisible();
   await page.locator('#hold-answer').click();
   await expect(page.locator('#hold-answer')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#hold-answer')).toHaveText('고정 해제');
   await page.evaluate(() => { window.__heldAnswerNode = document.querySelector('#answer-text').firstChild; });
   for (const id of [2, 3]) {
     reply(ws, id, `Question ${id}?`, `Answer ${id}.`);
     await expect(page.locator('#reading-status')).toContainText('새 답변 도착');
+    await expect(page.locator('#hold-answer')).toHaveText('새 답변 보기');
     await expect(page.locator('#answer-text')).toHaveText('Review the dependencies first.');
     await expect(page.locator('#question-text')).toHaveText('What is the next step?');
     await expect(page.locator('#answer-korean')).toHaveText('뜻: Review the dependencies first.');
@@ -323,6 +428,7 @@ test('drafts do not replace complete answers and hold keeps its exact question w
   await expect(page.locator('#question-text')).toHaveText('Question 3?');
   await expect(page.locator('#answer-korean')).toHaveText('뜻: Answer 3.');
   await expect(page.locator('#hold-answer')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#hold-answer')).toHaveText('답변 고정');
   ws.send({ type: 'transcript.final', turnId: 't4', revision: 1, text: 'Question 4?' });
   ws.send({ type: 'response.started', turnId: 't4', responseId: 'r4' });
   ws.send({ type: 'response.delta', turnId: 't4', responseId: 'r4', text: 'New incomplete draft' });

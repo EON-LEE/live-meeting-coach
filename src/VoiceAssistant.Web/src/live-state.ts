@@ -1,4 +1,5 @@
-import type { Grounding, ServerEvent, Source } from "./protocol.js";
+import type { Grounding, ReplyDecision, ServerEvent, Source } from "./protocol.js";
+import { ReadingHold } from "./reading-hold.js";
 
 export interface LiveTurn { id: string; revision: number; text: string; final: boolean }
 export interface LiveReply {
@@ -8,6 +9,8 @@ export interface LiveReply {
   grounding?: Grounding; suggestions?: string[]; respondNow?: boolean;
   /** The primary line is final (`primaryDone`), so it can be read before the reply completes. */
   primaryDone?: boolean;
+  /** The server's reading of the moment when the primary line was done (see {@link ReplyDecision}). */
+  decision?: ReplyDecision;
   /** The reply stopped after its primary line was shown: the line stays, without alternative or grounding. */
   interrupted?: boolean;
 }
@@ -76,39 +79,37 @@ export class LiveState {
   private latestTurn: string | undefined;
   private suppressedTurn: string | undefined;
   private suppressAll = false;
-  private heldReply: LiveReply | null = null;
-  private shownReply: LiveReply | null = null;
+  private readonly reading = new ReadingHold<LiveReply>();
   /** A `response_filtered` error arrived: the `response.cancelled` that follows withdraws its reply, wherever it is shown. */
   private withdrawing = false;
 
   /** The newest readable reply: a finished primary line or a completed reply. */
-  get shown(): LiveReply | null { return this.shownReply; }
-  get display(): LiveReply | null { return this.heldReply ?? this.shownReply; }
-  get readingHeld(): boolean { return this.heldReply !== null; }
-  get hasNewerReply(): boolean { return !!this.heldReply && !!this.shownReply && this.heldReply.id !== this.shownReply.id; }
+  get shown(): LiveReply | null { return this.reading.shown; }
+  get display(): LiveReply | null { return this.reading.display; }
+  get readingHeld(): boolean { return this.reading.isHeld; }
+  get hasNewerReply(): boolean { return this.reading.hasNewer; }
+  /** The answer on screen is held by the page, not the user, because the other person is still talking. */
+  get autoHeld(): boolean { return this.reading.auto; }
   get latest(): LiveTurn | undefined { return this.turns.at(-1); }
   /** A newer reply is being produced. With gathered replies, not every final gets its own reply. */
   get generating(): boolean { return !!this.current && !this.current.complete; }
   /**
    * The answer on screen is for an earlier question: a newer reply arrived while it was held, or, while `connected`, a newer
-   * one is being prepared.
+   * one is being prepared. Not while the page holds it: the other person is still talking, so it is still the answer to read.
    */
   showsEarlierAnswer(connected: boolean): boolean {
     const display = this.display;
-    return !!display && (this.hasNewerReply || connected && this.generating && this.current?.id !== display.id);
+    return !!display && !this.autoHeld && (this.hasNewerReply || connected && this.generating && this.current?.id !== display.id);
   }
 
   resetSession(): void {
     this.turns = []; this.current = null; this.lastCompleted = null; this.error = "";
     this.seen.clear(); this.order = []; this.latestTurn = undefined;
     this.suppressedTurn = undefined; this.suppressAll = false;
-    this.heldReply = null; this.shownReply = null; this.withdrawing = false;
+    this.reading.reset(); this.withdrawing = false;
   }
-  holdDisplay(): void {
-    const display = this.display;
-    if (display && (display.complete || display.primaryDone)) this.heldReply = display;
-  }
-  releaseDisplay(): void { this.heldReply = null; }
+  holdDisplay(): void { this.reading.hold(); }
+  releaseDisplay(): void { this.reading.release(); }
   pause(value: boolean): void {
     this.suppressAll = value;
     if (value) this.cancelCurrent(); else this.suppressedTurn = undefined;
@@ -126,7 +127,8 @@ export class LiveState {
   }
   /**
    * A new live session starts. Starting fresh clears everything. Continuing (다시 공유 / 다시 시작) keeps the conversation,
-   * but never an old pause or a reply the previous session was still producing, either of which would hide new replies.
+   * but never an old pause or a reply the previous session was still producing, either of which would hide new replies. The
+   * user's hold stays; the page's own hold (see {@link autoHeld}) ends with the talk it waited for.
    */
   restart(keepConversation: boolean): void {
     if (!keepConversation) { this.resetSession(); return; }
@@ -134,6 +136,7 @@ export class LiveState {
     this.suppressedTurn = undefined;
     this.error = "";
     this.endReply();
+    this.reading.restart();
   }
 
   /** A reply that ends after its primary line was shown keeps that line readable, marked as interrupted. */
@@ -142,16 +145,19 @@ export class LiveState {
     if (current && !current.complete && current.primaryDone) this.show({ ...current, interrupted: true });
     this.current = null;
   }
-  private show(reply: LiveReply): void {
-    this.shownReply = reply;
-    // A held reply keeps its text on screen and only gains what arrives later (alternative, grounding, sources).
-    if (this.heldReply?.id === reply.id) this.heldReply = reply;
+  private show(reply: LiveReply): void { this.reading.show(reply); }
+  /**
+   * A reply becomes readable for the first time. While the other person is still talking ("listen"), the answer on screen stays
+   * and the new one waits behind it, one tap away; any other reply ends that hold. The user's own hold is never released.
+   */
+  private arrive(reply: LiveReply): void {
+    if (reply.decision === "listen") this.reading.hold("listen"); else this.reading.releaseAuto();
+    this.show(reply);
   }
   /** The content filter stopped this reply: none of its text stays, neither shown, held nor as an interrupted line. */
   private withdraw(id: string): void {
     if (this.current?.id === id) this.current = null;
-    if (this.shownReply?.id === id) this.shownReply = null;
-    if (this.heldReply?.id === id) this.heldReply = null;
+    this.reading.withdraw(id);
   }
   /**
    * What a reply answers. The server gathers the finals of one settle window into one reply but names only the latest turn;
@@ -211,16 +217,17 @@ export class LiveState {
           e.responseId !== current.id || e.turnId !== current.turnId) return;
         if (e.type === "response.cancelled") { this.retire(); return; }
         if (e.type === "response.delta") {
-          const primaryDone = current.primaryDone || e.primaryDone === true;
-          this.current = { ...current, text: bounded(current.text + (e.text ?? "")), ...(primaryDone ? { primaryDone: true } : {}) };
-          if (primaryDone) this.show(this.current);
+          const primaryDone = current.primaryDone || e.primaryDone === true, first = primaryDone && !current.primaryDone;
+          this.current = { ...current, text: bounded(current.text + (e.text ?? "")), ...(primaryDone ? { primaryDone: true } : {}),
+            ...(first && e.decision ? { decision: e.decision } : {}) };
+          if (first) this.arrive(this.current); else if (primaryDone) this.show(this.current);
           return;
         }
         // The completed text is authoritative: it replaces a shown primary line that differs from it.
         this.current = { ...current, text: bounded(e.text!), complete: true, sources: structuredClone(e.sources ?? []),
           ...(e.grounding ? { grounding: e.grounding } : {}), ...(e.suggestions ? { suggestions: [...e.suggestions] } : {}), ...(e.respondNow ? { respondNow: true } : {}) };
         this.lastCompleted = this.current;
-        this.show(this.current);
+        if (current.primaryDone) this.show(this.current); else this.arrive(this.current);
         return;
       }
     }

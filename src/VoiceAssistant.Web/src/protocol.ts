@@ -1,6 +1,8 @@
 export interface Source { title: string; url: string; updatedAt?: string | null }
 export type Grounding = "disabled" | "grounded" | "unavailable" | "no_matches";
 export type ResponseRoute = "transcript" | "profile" | "knowledge";
+/** Whether a reply suits the moment ("respond") or the other person is still talking and it is for later ("listen"). */
+export type ReplyDecision = "respond" | "listen";
 export interface ServerEvent {
   type: string; turnId?: string; revision?: number; text?: string; responseId?: string;
   sources?: Source[]; code?: string; message?: string; retryable?: boolean;
@@ -18,6 +20,10 @@ export interface ServerEvent {
   replyKorean?: boolean;
   /** `session.ready`: this server accepts `session.update` (document search, Korean, `replyOn` and notes can change while running). */
   sessionUpdate?: boolean;
+  /** `session.ready`: this server accepts one-tap feedback on a reply (`response.feedback`). Older servers omit it. */
+  feedback?: boolean;
+  /** `session.ready`: this server accepts how long each reply stayed on screen (`response.viewed`). Older servers omit it. */
+  viewed?: boolean;
   /** `session.ready`: how many finalized turns of the previous connection the server continued with (`resumeConversation`). */
   resumedTurns?: number;
   /** `session.updated`: the effective document-search mode. */
@@ -30,6 +36,11 @@ export interface ServerEvent {
   segments?: number;
   /** `response.delta`: the primary line (first suggestion) is complete with this delta; sent at most once per response. */
   primaryDone?: boolean;
+  /**
+   * `response.delta` with `primaryDone`: the server's reading of the moment. Older servers omit it, and an unknown value is
+   * dropped: both mean "respond".
+   */
+  decision?: ReplyDecision;
   /** `response.korean`: the reply line (0 = primary, 1 = alternative) and its Korean meaning, or `failed` when it has none. */
   index?: number; korean?: string; failed?: boolean;
 }
@@ -53,9 +64,12 @@ export function parseEvent(data: unknown): ServerEvent {
   if (type === "session.ready") {
     if (e.replyKorean !== undefined && typeof e.replyKorean !== "boolean") throw new Error("Invalid replyKorean flag.");
     if (e.sessionUpdate !== undefined && typeof e.sessionUpdate !== "boolean") throw new Error("Invalid sessionUpdate flag.");
+    if (e.feedback !== undefined && typeof e.feedback !== "boolean") throw new Error("Invalid feedback flag.");
+    if (e.viewed !== undefined && typeof e.viewed !== "boolean") throw new Error("Invalid viewed flag.");
     if (e.resumedTurns !== undefined && (!Number.isSafeInteger(e.resumedTurns) || (e.resumedTurns as number) < 0))
       throw new Error("Invalid resumedTurns count.");
     return { type, ...(e.replyKorean === true ? { replyKorean: true } : {}), ...(e.sessionUpdate === true ? { sessionUpdate: true } : {}),
+      ...(e.feedback === true ? { feedback: true } : {}), ...(e.viewed === true ? { viewed: true } : {}),
       ...(e.resumedTurns === undefined ? {} : { resumedTurns: e.resumedTurns as number }) };
   }
   if (type === "session.updated") {
@@ -89,7 +103,8 @@ export function parseEvent(data: unknown): ServerEvent {
     if (e.primaryDone !== undefined && typeof e.primaryDone !== "boolean") throw new Error("Invalid primaryDone flag.");
     // An empty delta exists only to say that the primary line is already complete.
     if (!delta && e.primaryDone !== true) throw new Error("A response delta must carry text unless it marks the primary line done.");
-    return { type, turnId, responseId, text: delta, ...(e.primaryDone === true ? { primaryDone: true } : {}) };
+    const decision = e.primaryDone === true && (e.decision === "respond" || e.decision === "listen") ? e.decision : undefined;
+    return { type, turnId, responseId, text: delta, ...(e.primaryDone === true ? { primaryDone: true } : {}), ...(decision ? { decision } : {}) };
   }
   if (type === "response.korean") {
     if (e.index !== 0 && e.index !== 1) throw new Error("Invalid reply line index.");

@@ -1,11 +1,11 @@
 export interface MaterialDocument { id: string; title: string; chunks: number; updatedAt: string }
-export interface MaterialList {
+interface MaterialList {
   documents: MaterialDocument[];
   limits: { maxDocuments: number; maxChunks: number; maxFileBytes: number; maxCharactersPerDocument: number };
   usage: { documents: number; chunks: number };
   extensions: string[];
 }
-export const allowedExtensions = new Set((".txt .md .markdown .rst .csv .tsv .json .jsonl .yaml .yml .toml .ini .xml .html .htm .log .vtt .srt .sql .sh .ps1 .bat .cs .ts .tsx .js .jsx .mjs .py .java .go .rs .c .h .cpp .hpp .kt .swift .rb .php .scala .bicep .tf .docx .pptx .pdf").split(" "));
+const allowedExtensions = new Set((".txt .md .markdown .rst .csv .tsv .json .jsonl .yaml .yml .toml .ini .xml .html .htm .log .vtt .srt .sql .sh .ps1 .bat .cs .ts .tsx .js .jsx .mjs .py .java .go .rs .c .h .cpp .hpp .kt .swift .rb .php .scala .bicep .tf .docx .pptx .pdf").split(" "));
 const skippedDirectories = new Set(["node_modules", ".git", "bin", "obj", "dist", "build", ".venv", "__pycache__"]);
 export function fileRejection(file: Pick<File, "name" | "size">, path = file.name): string | null {
   const parts = path.replaceAll("\\", "/").split("/");
@@ -45,7 +45,7 @@ export const materialMessages: Record<string, string> = {
 export class MaterialError extends Error {
   constructor(readonly code: string) { super(materialMessages[code] ?? "The materials request failed. Retry later."); }
 }
-export type MaterialFetch = (path: string, init?: RequestInit) => Promise<Response>;
+type MaterialFetch = (path: string, init?: RequestInit) => Promise<Response>;
 export class MaterialsClient {
   constructor(private readonly request: MaterialFetch) {}
   private async execute(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
@@ -110,8 +110,8 @@ function validateDocument(value: unknown): void {
       d.title.length > 200 || !Number.isSafeInteger(d.chunks) || (d.chunks as number) < 0 || typeof d.updatedAt !== "string")
     throw new MaterialError("knowledge_unavailable");
 }
-export type UploadState = "queued" | "uploading" | "success" | "failed" | "cancelled";
-export interface UploadItem { name: string; size?: number; run(signal: AbortSignal): Promise<unknown>; state: UploadState; message: string; controller?: AbortController }
+type UploadState = "queued" | "uploading" | "success" | "failed" | "cancelled";
+interface UploadItem { name: string; size?: number; run(signal: AbortSignal): Promise<unknown>; state: UploadState; message: string; controller?: AbortController }
 export class UploadQueue {
   readonly items: UploadItem[] = [];
   private active = 0;

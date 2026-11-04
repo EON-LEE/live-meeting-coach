@@ -12,8 +12,8 @@ import { CaptureError, type AudioSource, type CaptureErrorKind, type HostSourceK
  * most 50 frames unacknowledged, so the page acknowledges every few frames. The host keeps the stream continuous
  * (silence while nothing is captured), like the browser worklet.
  */
-export type HostAudioKind = "teams" | "system";
-export type HostAudioState = "capturing" | "teams-not-running" | "unsupported-os" | "error" | "stopped";
+type HostAudioKind = "teams" | "system";
+type HostAudioState = "capturing" | "teams-not-running" | "unsupported-os" | "error" | "stopped";
 export interface HostAudioStatus {
   readonly state: HostAudioState;
   readonly detail: string;
@@ -24,7 +24,7 @@ export interface HostAudioStatus {
 /** Conditions that do not end the meeting: the host keeps waiting for Teams, or keeps retrying the capture, meanwhile. */
 export type HostAudioWarning = "teams-not-running" | "teams-silent" | "capture-error";
 /** What a host status means for the meeting: a warning to show (null clears it), or the failure that ends the capture. */
-export type HostStatusEffect =
+type HostStatusEffect =
   | { readonly fatal: false; readonly warning: HostAudioWarning | null }
   | { readonly fatal: true; readonly error: CaptureError };
 
@@ -36,12 +36,12 @@ export interface HostWebView {
 }
 export interface HostMessageEvent { readonly data: unknown }
 
-export const hostAudioVersion = 1;
-export const maxFramesPerMessage = 5;
+const hostAudioVersion = 1;
+const maxFramesPerMessage = 5;
 /** Frames between acknowledgements; well inside the host's 50-frame window. */
 export const ackEveryFrames = 5;
 /** How often the level meter reports, like the browser sources' meter. */
-export const levelIntervalMs = 100;
+const levelIntervalMs = 100;
 const states: readonly HostAudioState[] = ["capturing", "teams-not-running", "unsupported-os", "error", "stopped"];
 const kinds: readonly HostAudioKind[] = ["teams", "system"];
 

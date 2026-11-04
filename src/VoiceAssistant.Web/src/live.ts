@@ -6,29 +6,28 @@ import { CaptureError, DisplayAudioSource, MicrophoneAudioSource, isHostSource, 
 import { HostAudioSource, hostKind, hostWebView, isHostAudioAvailable } from "./host-audio.js";
 import { SocketTransport, asError } from "./transport.js";
 import type { SessionOptions, SessionUpdate } from "./options.js";
-import { CoachClient, CoachError, type CoachKind } from "./coach-client.js";
-import type { Grounding, ServerEvent } from "./protocol.js";
-import { LiveState, answers, leadSentence, meaningTexts, primaryMeaning, suggestionLabels, translatable, translationChunks,
-  type LiveReply, type LiveTurn } from "./live-state.js";
-import { PushedKorean, pushedKoreanWaitMs } from "./reply-korean.js";
-import { acknowledgedSettings, deferredUpdateNote, idleStatus, keptNotes, liveStartOptions, notesChipName, parseSettings, pendingUpdate,
+import { CoachClient } from "./coach-client.js";
+import type { ServerEvent } from "./protocol.js";
+import { groundingBadge, groundingDetail, holdButton, holdMenuLabel, readingStatus, type ReadingInput } from "./reading-view.js";
+import { LiveState, answers, leadSentence, meaningTexts, primaryMeaning, suggestionLabels, translatable } from "./live-state.js";
+import { LiveTranslations } from "./live-translation.js";
+import { acknowledgedSettings, deferredUpdateNote, idleStatus, keptNotes, liveStartOptions, notesChipName, parseSettings, pendingUpdate, startHint,
   settingsKey, stepAnswerSize, withDocumentSearch, withResponseMode, documentSearchOn, type AppliedSettings, type HostSources,
   type LiveSettings, type ResponseMode } from "./live-settings.js";
 import { LiveController, liveLimits, type SourceHooks } from "./live-controller.js";
 import { actionLabels, captureMessage, liveHost, liveMessage, reconnectText, sourceNames, warningMessage, type LiveWarning,
   type PageAction } from "./live-errors.js";
 import { LatencyMarks, debugEnabled } from "./live-latency.js";
+import { createMenu } from "./live-menu.js";
+import { createSettingsDialog } from "./live-settings-dialog.js";
+import { createFloat } from "./live-float.js";
+import { createFeedback } from "./live-feedback.js";
+import { DwellTracker } from "./live-dwell.js";
+import { $, liveDocument, setData, setHidden, setPressed, setText, setTitle, write } from "./live-dom.js";
 
-let liveDocument = document;
-const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
-  const value = document.getElementById(id) ?? liveDocument.getElementById(id);
-  if (!value) throw new Error(`Missing #${id}`);
-  return value as T;
-};
 const panel = $("live-panel"), stage = $("live-stage"), menu = $("live-menu");
 const toggleButton = $<HTMLButtonElement>("live-toggle"), pauseButton = $<HTMLButtonElement>("live-pause");
 const smallerButton = $<HTMLButtonElement>("answer-smaller"), largerButton = $<HTMLButtonElement>("answer-larger");
-const settingsDialog = $<HTMLDialogElement>("settings");
 const micDevice = $<HTMLSelectElement>("mic-device"), responseMode = $<HTMLSelectElement>("response-mode");
 const topic = $<HTMLInputElement>("topic"), notesField = $<HTMLTextAreaElement>("my-notes");
 const audioSource = $<HTMLSelectElement>("audio-source");
@@ -45,6 +44,10 @@ for (const [value, available] of [["teams", offered.teams], ["host-system", offe
 const auth = new BrowserAuth(undefined, { persistent: true });
 const coach = new CoachClient((path, init) => auth.coachRequest(path, init), () => auth.isFake);
 const state = new LiveState();
+const translations = new LiveTranslations({
+  coach, state, korean: () => settings.showKorean, captions: () => settings.showCaptions, changed: () => schedule(),
+  acceptsPushed: korean => /[\uac00-\ud7a3]/u.test(korean) || auth.isFake && korean.startsWith("[fake-ko] "),
+});
 
 let paused = false;
 /** One-off notes (sign-in results, another tab took over); cleared by the next start. */
@@ -53,16 +56,8 @@ let infoMessage = "";
 let startOffered = false;
 /** Whether that offered start continues the conversation on screen. */
 let offeredResume = false;
-let translations = new AbortController();
-const meetingKo = new Map<string, string>();
-const failedTurns = new Map<string, string>();
-const requestedTurns = new Set<string>();
-const replyKo = new Map<string, string[]>();
-// The server pushes a Korean line with each reply line; a line it cannot provide falls back to the translation request.
-const pushes = new PushedKorean(korean => /[\uac00-\ud7a3]/u.test(korean) || auth.isFake && korean.startsWith("[fake-ko] "));
+/** The server pushes a Korean line with each reply line (`replyKorean` of the connected session). */
 let pushing = false;
-// Only a reply that began while the server was pushing Korean has a pushed line to wait for.
-const pushedAtStart = new Set<string>();
 // What the connected session runs with, and whether the server accepts setting changes while connected.
 let applied: AppliedSettings = { responseMode: "grounded", replyKorean: false, replyOn: "all", notes: "" };
 let started: Omit<AppliedSettings, "replyKorean"> = { responseMode: "grounded", replyOn: "all", notes: "" };
@@ -70,7 +65,6 @@ let canUpdate = false, updating = false;
 /** The `session.update` waiting for its `session.updated`, which reports only whether notes are set. */
 let sentUpdate: SessionUpdate | null = null;
 let quickNote = "";
-const recentTranslatedTurns = 6;
 
 function storage(): Storage | undefined {
   try { return localStorage; } catch { return undefined; }
@@ -126,8 +120,8 @@ function changeSettings(next: LiveSettings): void {
   const before = settings;
   settings = next;
   persist();
-  if (before.showKorean && !next.showKorean) dropKorean();
-  if (next.showKorean && (!before.showKorean || next.showCaptions && !before.showCaptions)) translateOnScreen();
+  if (before.showKorean && !next.showKorean) translations.clear();
+  if (next.showKorean && (!before.showKorean || next.showCaptions && !before.showCaptions)) translations.onScreen();
   syncSession();
   render();
 }
@@ -137,7 +131,10 @@ $("reply-all").addEventListener("click", () => changeSettings({ ...settings, rep
 $("reply-questions").addEventListener("click", () => changeSettings({ ...settings, replyOn: "questions" }));
 $("toggle-captions").addEventListener("click", () => changeSettings({ ...settings, showCaptions: !settings.showCaptions }));
 $("toggle-korean").addEventListener("click", () => changeSettings({ ...settings, showKorean: !settings.showKorean }));
-$("notes-chip").addEventListener("click", () => openSettings(notesField));
+$("notes-chip").addEventListener("click", () => settingsDialog.open(notesField));
+/** The start hint stays closed for this page once closed; notes or a topic hide it for good. */
+let hintClosed = false;
+$("start-hint-close").addEventListener("click", () => { hintClosed = true; render(); });
 responseMode.addEventListener("change", () => changeSettings(withResponseMode(settings, responseMode.value as ResponseMode)));
 
 /** A− / A+ step the English answer size. At the smallest or largest size the pressed button turns off, so focus moves to the other. */
@@ -191,7 +188,7 @@ function displayOptions(): DisplayCaptureOptions {
 }
 function showLevel(level: number): void {
   for (const id of ["input-level", "live-level"]) {
-    const meter = liveDocument.getElementById(id) ?? document.getElementById(id);
+    const meter = liveDocument().getElementById(id) ?? document.getElementById(id);
     if (meter instanceof HTMLMeterElement) meter.value = level;
   }
 }
@@ -223,7 +220,7 @@ function createSource(kind: CaptureSourceKind, hooks: SourceHooks): AudioSource 
     },
     devices: navigator.mediaDevices,
     deviceId: settings.deviceId || undefined,
-    onDevices: fillDevices,
+    onDevices: devices => settingsDialog.fillDevices(devices),
   });
 }
 
@@ -240,9 +237,8 @@ const controller = new LiveController({
 // ---------- Live session lifecycle ----------
 
 function resetConversation(): void {
-  translations.abort(); translations = new AbortController();
-  state.resetSession(); meetingKo.clear(); failedTurns.clear(); requestedTurns.clear(); replyKo.clear(); pushes.clear();
-  pushedAtStart.clear();
+  translations.clear();
+  state.resetSession();
 }
 
 /** Whether this page can capture `kind` here at all: a browser API, or LiveCoach.exe offering it. */
@@ -303,7 +299,8 @@ async function signInAndResume(): Promise<void> {
 }
 
 async function stopLive(message = ""): Promise<void> {
-  pushing = false; pushes.expire(); resetUpdate();
+  reportViewed(true);
+  pushing = false; translations.expire(); resetUpdate();
   infoMessage = message; startOffered = false;
   const stopped = controller.stop();
   render();
@@ -344,7 +341,8 @@ function changeLiveSource(kind: CaptureSourceKind): void {
 
 /** A dropped or replaced connection: replies in flight end, the next `session.ready` restates the capabilities. */
 function onDisconnect(): void {
-  pushing = false; pushes.expire(); resetUpdate();
+  dwell.drop();
+  pushing = false; translations.expire(); resetUpdate();
   state.endReply();
   state.clearError();
   schedule();
@@ -352,7 +350,8 @@ function onDisconnect(): void {
 
 function onEvent(e: ServerEvent): void {
   // With Korean off nothing is recorded, even while the server has not yet stopped sending it.
-  if (e.type === "response.korean") { if (settings.showKorean) { pushes.record(e); schedule(); } return; }
+  if (e.type === "response.korean") { if (settings.showKorean) { translations.record(e); schedule(); } return; }
+  if (e.responseId) dwell.issued(e.responseId);
   state.apply(e);
   if (e.type === "session.ready") {
     pushing = e.replyKorean === true; canUpdate = e.sessionUpdate === true; updating = false;
@@ -365,101 +364,17 @@ function onEvent(e: ServerEvent): void {
     pushing = applied.replyKorean; updating = false; sentUpdate = null;
     syncSession();
   }
-  if (e.type === "response.started" && pushing && settings.showKorean) pushedAtStart.add(e.responseId!);
+  if (e.type === "response.started" && pushing && settings.showKorean) translations.started(e.responseId!);
   if (e.type === "transcript.final") {
     latency.final(e.turnId!);
-    if (settings.showKorean && settings.showCaptions) void translateTurn(e.turnId!, e.text!);
+    if (settings.showKorean && settings.showCaptions) void translations.translateTurn(e.turnId!, e.text!);
   }
   if (e.type === "response.completed") {
     latency.completed(e.responseId!, e.turnId!);
     const completed = state.current;
-    if (settings.showKorean && completed && completed.id === e.responseId && completed.complete) void translateReply(completed);
+    if (settings.showKorean && completed && completed.id === e.responseId && completed.complete) void translations.translateReply(completed);
   }
   schedule();
-}
-
-// ---------- Korean translation (translation-only, retried on transient failure) ----------
-
-function retryable(error: unknown): boolean {
-  if (error instanceof CoachError) return ["busy", "provider_unavailable", "provider_timeout"].includes(error.code);
-  return error instanceof TypeError || (error instanceof Error && error.name === "TimeoutError");
-}
-function failureLabel(error: unknown): string {
-  const code = error instanceof CoachError ? error.code : "";
-  return code === "busy" ? "번역 요청 제한 · 잠시 후 재시도" : code === "provider_timeout" ? "한국어 번역 시간 초과"
-    : code === "unauthorized" || code === "forbidden" ? "한국어 번역 인증 오류" : "한국어 번역 실패";
-}
-async function translate(kind: CoachKind, text: string, signal: AbortSignal): Promise<string> {
-  const parts: string[] = [];
-  for (const chunk of translationChunks(text)) {
-    for (let tries = 1; ; tries++) {
-      try { parts.push(await coach.translate(kind, chunk, signal)); break; }
-      catch (error) {
-        if (tries >= 3 || signal.aborted || !retryable(error)) throw error;
-        await new Promise(resolve => setTimeout(resolve, 300 * tries));
-      }
-    }
-  }
-  return parts.join(" ");
-}
-async function translateTurn(turnId: string, text: string): Promise<void> {
-  const signal = translations.signal;
-  requestedTurns.add(turnId);
-  failedTurns.delete(turnId);
-  try {
-    const korean = await translate("question", text, signal);
-    if (!signal.aborted) { meetingKo.set(turnId, korean); schedule(); }
-  } catch (error) {
-    if (signal.aborted) return;
-    meetingKo.set(turnId, failureLabel(error)); failedTurns.set(turnId, text); schedule();
-  }
-}
-async function translateReply(reply: LiveReply, retry = false): Promise<void> {
-  const signal = translations.signal, values = answers(reply);
-  const result = values.map(() => "한국어 번역 중…");
-  replyKo.set(reply.id, result); schedule();
-  await Promise.all(values.map(async (english, index) => {
-    try { result[index] = await replyLine(reply.id, index, english, retry, signal); }
-    catch (error) { if (!signal.aborted) result[index] = `${failureLabel(error)} · 우클릭으로 재시도`; }
-    if (!signal.aborted) schedule();
-  }));
-  const keep = new Set([state.current?.id, state.lastCompleted?.id, state.shown?.id, state.display?.id]);
-  for (const id of replyKo.keys()) if (!keep.has(id)) replyKo.delete(id);
-  for (const id of pushedAtStart) if (!keep.has(id)) pushedAtStart.delete(id);
-  pushes.prune(keep);
-}
-/** The server's pushed line when it has one in time; otherwise (or on a retry) the client translates the line itself. */
-async function replyLine(responseId: string, index: number, english: string, retry: boolean, signal: AbortSignal): Promise<string> {
-  const wait = !retry && pushedAtStart.has(responseId) ? pushedKoreanWaitMs : 0;
-  const pushed = await pushes.wait(responseId, index, wait, signal);
-  return pushed ?? translate("reply", english, signal);
-}
-function retryTranslations(): void {
-  if (!settings.showKorean) return;
-  const display = state.display;
-  if (translatable(display)) void translateReply(display, true);
-  if (settings.showCaptions) for (const [turnId, text] of failedTurns) void translateTurn(turnId, text);
-}
-
-/** Turning Korean off stops all Korean work at once: running requests end and no "translating…" line stays behind. */
-function dropKorean(): void {
-  translations.abort(); translations = new AbortController();
-  meetingKo.clear(); failedTurns.clear(); requestedTurns.clear(); replyKo.clear();
-  pushes.clear(); pushedAtStart.clear();
-}
-/** Turning Korean (or captions) on translates what is already on screen, so the meanings do not wait for the next reply. */
-function translateOnScreen(): void {
-  const display = state.display;
-  if (translatable(display) && !replyKo.has(display.id)) void translateReply(display, true);
-  if (!settings.showCaptions) return;
-  for (const turn of state.turns.filter(value => value.final).slice(-recentTranslatedTurns))
-    if (!requestedTurns.has(turn.id)) void translateTurn(turn.id, turn.text);
-}
-/** The Korean line shown under a heard turn; `undefined` means the turn has none (Korean off, or never requested). */
-function turnKorean(turn: LiveTurn): string | undefined {
-  if (!settings.showKorean) return undefined;
-  if (!turn.final) return "듣는 중…";
-  return meetingKo.get(turn.id) ?? (requestedTurns.has(turn.id) ? "한국어 번역 중…" : undefined);
 }
 
 // ---------- Focused reading view ----------
@@ -469,17 +384,14 @@ let pending = false;
 function schedule(): void {
   if (pending) return;
   pending = true;
-  const view = liveDocument.defaultView && !liveDocument.defaultView.closed ? liveDocument.defaultView : window;
+  const shown = liveDocument().defaultView;
+  const view = shown && !shown.closed ? shown : window;
   const run = (): void => { if (!pending) return; pending = false; render(); };
   view.requestAnimationFrame(run);
   view.setTimeout(run, 100);
 }
 let renderedConversation = "";
 
-function write(element: HTMLElement, text: string): void {
-  if (element.textContent !== text) element.textContent = text;
-}
-function setText(id: string, text: string): void { write($(id), text); }
 /** 추천 1 with its first sentence set apart (see leadSentence); the element's text stays exactly the line. */
 function writeAnswer(element: HTMLElement, text: string, reply: boolean): void {
   if (element.textContent === text) return;
@@ -534,14 +446,6 @@ function render(): void {
   renderControls();
 }
 
-function setPressed(id: string, pressed: boolean): void {
-  const element = $(id), value = String(pressed);
-  if (element.getAttribute("aria-pressed") !== value) element.setAttribute("aria-pressed", value);
-}
-function setHidden(id: string, hidden: boolean): void {
-  const element = $(id);
-  if (element.hidden !== hidden) element.hidden = hidden;
-}
 /** Quick settings and what they show or hide. Hidden parts keep their content, so switching one on shows it at once. */
 function renderQuick(): void {
   const search = documentSearchOn(settings);
@@ -552,6 +456,9 @@ function renderQuick(): void {
   const notesChip = $("notes-chip"), notesSet = String(settings.notes.length > 0), notesName = notesChipName(settings.notes);
   if (notesChip.dataset.set !== notesSet) notesChip.dataset.set = notesSet;
   if (notesChip.getAttribute("aria-label") !== notesName) notesChip.setAttribute("aria-label", notesName);
+  const hint = controller.active || hintClosed ? "" : startHint(settings);
+  setText("start-hint-text", hint); setHidden("start-hint", !hint);
+  setData(notesChip, "nudge", hint ? "true" : undefined);
   setHidden("caption-block", !settings.showCaptions); setHidden("conversation-section", !settings.showCaptions);
   setHidden("answer-meaning", !settings.showKorean); setHidden("alternative-meaning", !settings.showKorean);
   setText("details-summary", settings.showCaptions ? "대화 · 상세 근거" : "상세 근거");
@@ -569,7 +476,7 @@ function renderConversation(): void {
   // Hidden captions are not rebuilt; switching them on renders the latest turns at once.
   if (!settings.showCaptions) return;
   const recent = state.turns.slice(-12);
-  const signature = JSON.stringify(recent.map(turn => [turn.id, turn.revision, turn.final, turnKorean(turn) ?? null]));
+  const signature = JSON.stringify(recent.map(turn => [turn.id, turn.revision, turn.final, translations.turnKorean(turn) ?? null]));
   if (signature === renderedConversation) return;
   renderedConversation = signature;
   const conversation = $("conversation");
@@ -584,7 +491,7 @@ function renderConversation(): void {
     const en = document.createElement("p");
     en.className = "en"; en.lang = "en"; en.textContent = turn.text;
     line.append(en);
-    const korean = turnKorean(turn);
+    const korean = translations.turnKorean(turn);
     if (korean !== undefined) {
       const ko = document.createElement("p");
       ko.className = "ko"; ko.lang = "ko"; ko.textContent = korean;
@@ -595,20 +502,11 @@ function renderConversation(): void {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
-const groundingBadges: Readonly<Record<Grounding, string>> = {
-  grounded: "문서 인용 있음 · 내용 확인 필요", no_matches: "문서 근거 없음 · 사실 확인 필요",
-  unavailable: "자료 확인 불가 · 사실 답변에 의존하지 마세요", disabled: "문서 검색 미사용 · 대화 맥락만 사용",
-};
-const groundingDetails: Readonly<Record<Grounding, string>> = {
-  grounded: "근거 있음 · 내 업로드 문서", no_matches: "문서 근거 없음 · 사실 확인 필요",
-  unavailable: "자료 확인 불가 · 문서 검색이 실패해 일반적인 답변만 보여 줍니다", disabled: "이번 답변은 문서 검색을 사용하지 않음",
-};
-
 function renderSuggestions(): void {
   const display = state.display, values = answers(display);
   const shown = state.shown;
   if (shown) latency.shownReply(shown.id, shown.turnId, shown.complete);
-  const ko = display ? replyKo.get(display.id) ?? [] : [];
+  const ko = display ? translations.replyLines(display.id) : [];
   const answerText = $("answer-text");
   writeAnswer(answerText, values[0] ?? "답변이 완성되면 여기에 표시됩니다.", values[0] !== undefined);
   // A new answer on screen glows once, so a glance tells it from the one read before; no motion if the user asked for less.
@@ -620,11 +518,14 @@ function renderSuggestions(): void {
         { duration: 1000, easing: "ease-out" });
   }
   if (settings.showKorean) {
-    setText("answer-korean", primaryMeaning(display, ko[0], display ? pushes.peek(display.id, 0) : undefined));
+    setText("answer-korean", primaryMeaning(display, ko[0], display ? translations.pushed(display.id, 0) : undefined));
     setText("alternative-korean", ko[1] ?? meaningTexts.preparing);
   }
   setHidden("alternative-card", values.length < 2);
   setText("alternative-text", values[1] ?? "");
+  feedback.render(display?.id, controller.canFeedback);
+  dwell.show(controller.canReport && liveDocument().visibilityState !== "hidden" ? display?.id : undefined);
+  reportViewed(false);
   const generating = controller.isReady && state.generating;
   const finishing = !!display && generating && state.current?.id === display.id;
   const previous = state.showsEarlierAnswer(controller.isReady);
@@ -633,29 +534,22 @@ function renderSuggestions(): void {
   setText("primary-label", labels.primary);
   setText("alternative-label", labels.alternative);
   const answersSection = panel.querySelector<HTMLElement>(".live-answers")!;
-  if (answersSection.dataset.previous !== String(previous)) answersSection.dataset.previous = String(previous);
+  setData(answersSection, "previous", String(previous));
+  setData(answersSection, "hold", state.autoHeld ? "listen" : undefined);
   // What the reply answers: every final gathered into it (see LiveState), or the latest speech before any reply.
   setText("question-text", display?.question ?? state.turns.find(turn => turn.id === display?.turnId)?.text
     ?? (display ? "이전 대화" : state.latest?.text ?? "영어 대화를 기다리고 있어요."));
-  setText("reading-status", state.readingHeld
-    ? state.hasNewerReply ? "새 답변 도착 · 고정을 해제하면 표시합니다"
-      : generating ? "화면 고정됨 · 새 답변 준비 중"
-        : "화면 고정됨 · 오디오 전송 상태는 위에서 확인하세요"
-    : finishing ? "추천 문장입니다 · 대안과 근거를 확인하는 중"
-      : generating ? display ? "새 답변 준비 중 · 아래는 이전 질문용 답변" : "답변 준비 중 · 완성되면 표시합니다"
-        : display?.interrupted ? "답변 생성이 중단되었습니다 · 근거를 확인하지 못했습니다"
-          : display ? "추천 문장입니다 · 내용 확인 후 사용하세요"
-            : controller.active ? "듣는 중 · 답변이 완성되면 표시합니다" : idleStatus(settings));
-  const hold = $<HTMLButtonElement>("hold-answer");
-  hold.disabled = !display;
-  setPressed("hold-answer", state.readingHeld);
-  write(hold, state.readingHeld ? state.hasNewerReply ? "새 답변 보기" : "고정 해제" : "답변 고정");
-  setText("continuity", "추천은 실제로 말한 내용이 아닙니다. 화면 고정은 오디오 전송을 중지하지 않습니다.");
+  const reading: ReadingInput = { held: state.readingHeld, autoHeld: state.autoHeld, hasNewer: state.hasNewerReply, generating, finishing,
+    display: !!display, interrupted: !!display?.interrupted, active: controller.active, idle: idleStatus(settings) };
+  setText("reading-status", readingStatus(reading));
+  const hold = $<HTMLButtonElement>("hold-answer"), holdView = holdButton(reading);
+  hold.disabled = holdView.disabled;
+  setPressed("hold-answer", holdView.pressed);
+  write(hold, holdView.label);
   const badge = $("grounding-badge");
   if (badge.dataset.grounding !== (display?.grounding ?? "")) badge.dataset.grounding = display?.grounding ?? "";
-  write(badge, display?.grounding ? groundingBadges[display.grounding]
-    : display?.interrupted ? "답변 중단 · 근거 확인 안 됨" : generating ? "근거 확인 중" : "근거 상태 대기");
-  setText("grounding-text", display?.grounding ? groundingDetails[display.grounding] : "문서 근거 상태는 답변 완료 후 표시됩니다");
+  write(badge, groundingBadge(display?.grounding, reading));
+  setText("grounding-text", groundingDetail(display?.grounding));
   const sources = display?.sources ?? [];
   setText("sources-text", sources.slice(0, 3).map(source => source.title).join(" · ") +
     (sources.length > 3 ? ` · 외 ${sources.length - 3}개` : ""));
@@ -667,12 +561,23 @@ function toggleReadingHold(): void {
 }
 $("hold-answer").addEventListener("click", toggleReadingHold);
 
+const feedback = createFeedback({ root: $("feedback"), send: (id, reason) => controller.feedback(id, reason) });
+
+// How long each reply stayed on screen, for a server that asked (see DwellTracker): sent in batches, and at once, with the
+// reply on screen, when the panel is hidden, the page leaves or live stops.
+const dwell = new DwellTracker(() => performance.now());
+function reportViewed(all: boolean): void {
+  if (all) dwell.show(undefined);
+  for (const items of dwell.take(all)) controller.report(items);
+}
+function viewedVisibility(): void {
+  if (liveDocument().visibilityState === "hidden") reportViewed(true); else schedule();
+}
+document.addEventListener("visibilitychange", viewedVisibility);
+
 // ---------- Session controls: header buttons and the right-click menu ----------
 
 const item = (action: string): HTMLButtonElement => menu.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!;
-function setTitle(element: HTMLElement, title: string): void {
-  if (element.title !== title) element.title = title;
-}
 /** The menu, and the header's start/stop and pause buttons, which run the same actions with the same states as their items. */
 function renderControls(): void {
   const active = controller.active, ready = controller.isReady;
@@ -689,192 +594,41 @@ function renderControls(): void {
   write(pauseButton, paused ? "다시 듣기" : "일시정지");
   setTitle(pauseButton, item("pause").textContent ?? "");
   item("hold").disabled = !state.display;
-  write(item("hold"), state.readingHeld
-    ? state.hasNewerReply ? "새 답변 보기 / 화면 고정 해제" : "화면 고정 해제"
-    : "읽는 동안 답변 고정 (오디오는 계속 듣기)");
-  item("translate").disabled = !settings.showKorean || !translatable(state.display) && failedTurns.size === 0;
-  item("float").hidden = !("documentPictureInPicture" in window);
-  write(item("float"), pipWindow ? "작은 창 닫고 페이지로 돌아가기" : "항상 위 작은 창으로 띄우기");
+  write(item("hold"), holdMenuLabel({ held: state.readingHeld, hasNewer: state.hasNewerReply }));
+  item("translate").disabled = !settings.showKorean || !translatable(state.display) && !translations.hasFailedTurns;
+  item("float").hidden = !float.supported;
+  write(item("float"), float.window ? "작은 창 닫고 페이지로 돌아가기" : "항상 위 작은 창으로 띄우기");
 }
 /** What a menu item or a header button does. Start runs inside the click, so a share picker may open. */
 function runAction(action: string): void {
-  if (action === "settings") openSettings();
+  if (action === "settings") settingsDialog.open();
   if (action === "start") startLive();
   if (action === "stop") void stopLive();
   if (action === "pause") { paused = !paused; state.pause(paused); controller.pause(paused); render(); }
   if (action === "hold") toggleReadingHold();
   if (action === "retry") { state.beginRequest(); controller.request(); render(); }
-  if (action === "translate") retryTranslations();
-  if (action === "float") void toggleFloat();
+  if (action === "translate") translations.retry();
+  if (action === "float") void float.toggle();
 }
 // The toggle runs what its label says, even if the session changed in the frame before the label caught up.
 toggleButton.addEventListener("click", () => runAction(toggleButton.dataset.command === "stop" ? "stop" : "start"));
 pauseButton.addEventListener("click", () => runAction("pause"));
 
-/** Whether the element can hold keyboard focus now: still in the panel, shown and enabled. */
-function canFocus(element: Element | null): element is HTMLElement {
-  return element instanceof HTMLElement && panel.contains(element) && !element.matches(":disabled") && element.getClientRects().length > 0;
-}
-/**
- * Focus goes back to the element that opened the menu or the settings dialog, or to the panel when that element is gone.
- * Only closing them calls this: streaming updates never move focus, which may be in Teams or PowerPoint.
- */
-function returnFocus(opener: Element | null): void {
-  (canFocus(opener) ? opener : panel).focus({ preventScroll: true });
-}
-
-function positionMenu(x: number, y: number): void {
-  const bounds = panel.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, bounds.width - menu.offsetWidth - 4));
-  const top = Math.max(4, Math.min(y, bounds.height - menu.offsetHeight - 4));
-  menu.style.left = `${left}px`; menu.style.top = `${top}px`;
-}
-new ResizeObserver(() => {
-  if (!menu.hidden) positionMenu(parseFloat(menu.style.left), parseFloat(menu.style.top));
-}).observe(panel);
-/** The items that can take focus: enabled and shown (the WebView2 host hides the floating-window item with CSS). */
-function menuItems(): HTMLButtonElement[] {
-  return [...menu.querySelectorAll<HTMLButtonElement>("button")].filter(button => !button.disabled && button.getClientRects().length > 0);
-}
-/** While the menu is open: the element it was opened from, and how to stop listening for what closes it. */
-let openedMenu: { opener: Element | null; release(): void } | undefined;
-function openMenu(x: number, y: number): void {
-  renderControls();
-  menu.hidden = false;
-  const bounds = panel.getBoundingClientRect();
-  positionMenu(x - bounds.left, y - bounds.top);
-  if (!openedMenu) {
-    const owner = panel.ownerDocument, opener = owner.activeElement;
-    const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape") closeMenu(); };
-    const onPointer = (event: PointerEvent): void => {
-      if (menu.contains(event.target as Node)) return;
-      closeMenu();
-      // A click on another control focuses that control; a click on anything else would leave focus nowhere.
-      owner.defaultView?.setTimeout(() => {
-        const active = owner.activeElement;
-        if (menu.hidden && (!active || active === owner.body || active === panel)) returnFocus(opener);
-      });
-    };
-    owner.addEventListener("pointerdown", onPointer, true); owner.addEventListener("keydown", onKey, true);
-    openedMenu = { opener, release: () => {
-      owner.removeEventListener("pointerdown", onPointer, true); owner.removeEventListener("keydown", onKey, true);
-    } };
-  }
-  menuItems()[0]?.focus();
-}
-/** Hides the menu; focus returns to where it was opened from (Escape, a choice or a click outside), unless `refocus` is false. */
-function closeMenu(refocus = true): void {
-  menu.hidden = true;
-  const opened = openedMenu;
-  if (!opened) return;
-  openedMenu = undefined;
-  opened.release();
-  if (refocus) returnFocus(opened.opener);
-}
-// Right-click, or Shift+F10 / the menu key on the focused panel or one of its buttons. Inside the open menu it stays as it is.
-panel.addEventListener("contextmenu", event => {
-  event.preventDefault();
-  if (!menu.contains(event.target as Node)) openMenu(event.clientX, event.clientY);
-});
-menu.addEventListener("keydown", event => {
-  // Tab leaves the menu from where it was opened.
-  if (event.key === "Tab") { closeMenu(); return; }
-  const items = menuItems(), last = items.length - 1;
-  const index = items.indexOf(panel.ownerDocument.activeElement as HTMLButtonElement);
-  const next = event.key === "ArrowDown" ? index < last ? index + 1 : 0
-    : event.key === "ArrowUp" ? index > 0 ? index - 1 : last
-    : event.key === "Home" ? 0 : event.key === "End" ? last : undefined;
-  if (next === undefined) return;
-  event.preventDefault();
-  items[next]?.focus();
-});
-menu.addEventListener("click", event => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button");
-  if (!button) return;
-  const opener = openedMenu?.opener ?? null;
-  // Every item closes the menu; the items LiveCoach.exe adds (opacity, minimize, exit) run their own action.
-  closeMenu();
-  if (button.dataset.action) runAction(button.dataset.action);
-  // A choice can turn off the button the menu was opened from (stop turns off pause): focus then goes to the panel.
-  const focused = panel.ownerDocument.activeElement;
-  if (focused === opener ? !canFocus(opener) : !focused || focused === panel.ownerDocument.body) returnFocus(opener);
-});
+const liveMenu = createMenu({ panel, menu, refresh: renderControls, run: runAction });
 
 // ---------- Settings dialog ----------
 
-function fillDevices(devices: MediaDeviceInfo[]): void {
-  const selected = settings.deviceId;
-  micDevice.replaceChildren(new Option("브라우저 기본 마이크", ""));
-  for (const device of devices.filter(value => value.kind === "audioinput"))
-    micDevice.add(new Option(device.label || "마이크", device.deviceId));
-  micDevice.value = [...micDevice.options].some(option => option.value === selected) ? selected : "";
-}
-function renderAccount(): void {
-  const label = auth.isDemo ? "로그인" : "Microsoft 계정 연결";
-  $("account-status").textContent = auth.isFake ? "로컬 테스트 서버 (로그인 불필요)"
-    : auth.signedIn ? `로그인됨: ${auth.accountName} · 이 브라우저에서 로그인이 유지됩니다`
-    : auth.isDemo ? "아직 로그인하지 않았습니다." : "Microsoft 계정이 아직 연결되지 않았습니다.";
-  $("signin").hidden = auth.isFake;
-  $("signin").textContent = auth.signedIn ? (auth.isDemo ? "다시 로그인" : "다른 계정으로 연결") : label;
-}
-/** The element the settings dialog was opened from; focus returns to it when the dialog closes. */
-let settingsOpener: Element | null = null;
-/** Opens the settings dialog, with focus on `field` when one is given (the "내 메모" chip opens the notes). */
-function openSettings(field?: HTMLElement): void {
-  settingsOpener = panel.ownerDocument.activeElement;
-  if (pipWindow) window.focus();
-  renderAccount();
-  void navigator.mediaDevices?.enumerateDevices().then(fillDevices).catch(() => undefined);
-  settingsDialog.showModal();
-  field?.focus();
-}
-$("signin").addEventListener("click", () => {
-  void auth.signIn().then(renderAccount, error => { $("account-status").textContent = `로그인 실패: ${asError(error).message}`; });
-});
-settingsDialog.addEventListener("close", () => {
-  saveSettings(); syncSession(); render();
-  // The browser has already put focus back where the dialog was opened from. The close event comes a task later, when focus
-  // may have moved on: only focus left nowhere or in the closed dialog (its opener is gone or turned off) goes to the opener
-  // or the panel.
-  const focused = panel.ownerDocument.activeElement;
-  if (!focused || focused === panel.ownerDocument.body || settingsDialog.contains(focused)) returnFocus(settingsOpener);
+const settingsDialog = createSettingsDialog({
+  panel, dialog: $<HTMLDialogElement>("settings"), micDevice, auth, deviceId: () => settings.deviceId, floating: () => !!float.window,
+  closed: () => { saveSettings(); syncSession(); render(); },
 });
 
 // ---------- Always-on-top floating window (Document Picture-in-Picture, Edge/Chrome) ----------
 
-interface DocumentPictureInPicture { requestWindow(options: { width: number; height: number }): Promise<Window> }
-let pipWindow: Window | undefined;
-async function toggleFloat(): Promise<void> {
-  if (pipWindow) { pipWindow.close(); return; }
-  const api = (window as unknown as { documentPictureInPicture?: DocumentPictureInPicture }).documentPictureInPicture;
-  if (!api) return;
-  const floating = await api.requestWindow({ width: 550, height: 860 });
-  for (const sheet of [...document.styleSheets]) {
-    try {
-      const style = floating.document.createElement("style");
-      style.textContent = [...sheet.cssRules].map(rule => rule.cssText).join("\n");
-      floating.document.head.append(style);
-    } catch {
-      if (sheet.href) {
-        const link = floating.document.createElement("link"); link.rel = "stylesheet"; link.href = sheet.href;
-        floating.document.head.append(link);
-      }
-    }
-  }
-  floating.document.documentElement.lang = "ko";
-  floating.document.title = "Live Coach";
-  floating.document.body.className = "live-body live-floating";
-  const floatingStage = floating.document.createElement("main");
-  floatingStage.className = "live-stage";
-  floatingStage.append(panel);
-  floating.document.body.append(floatingStage);
-  liveDocument = floating.document;
-  pipWindow = floating;
-  floating.addEventListener("pagehide", () => {
-    stage.append(panel); liveDocument = document; pipWindow = undefined; closeMenu(false); pending = false; render();
-  });
-  render();
-}
+const float = createFloat({
+  panel, stage, opened: floating => { floating.document.addEventListener("visibilitychange", viewedVisibility); render(); },
+  returned: () => { liveMenu.close(false); pending = false; render(); },
+});
 
 // ---------- One live tab at a time (prevents two tabs from replacing each other's session) ----------
 
@@ -882,7 +636,7 @@ const liveChannel = "BroadcastChannel" in window ? new BroadcastChannel("live-co
 liveChannel?.addEventListener("message", event => {
   if (event.data === "started" && controller.active) void stopLive("다른 탭에서 라이브를 시작해 이 탭은 멈췄습니다.");
 });
-window.addEventListener("pagehide", () => { void controller.stop(); });
+window.addEventListener("pagehide", () => { reportViewed(true); void controller.stop(); });
 
 if (debug) Object.assign(window, { __liveCoachDebug: { latency: latency.records, stats: controller.stats } });
 

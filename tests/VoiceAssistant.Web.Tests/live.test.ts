@@ -136,6 +136,17 @@ test("Live: session.ready reports the settings-update capability only when the s
     assert.throws(() => parseEvent(JSON.stringify({ type: "session.ready", sessionUpdate: bad })), /sessionUpdate/);
 });
 
+test("Live: session.ready reports the one-tap feedback capability only when the server set it to true", () => {
+  const ready = (extra: object) => parseEvent(JSON.stringify({ type: "session.ready", protocolVersion: 1, ...extra }));
+  assert.deepEqual(ready({ feedback: true }), { type: "session.ready", feedback: true });
+  assert.deepEqual(ready({ feedback: false }), { type: "session.ready" });
+  assert.deepEqual(ready({}), { type: "session.ready" }, "an older server leaves it out");
+  for (const bad of ["true", 1, null]) assert.throws(() => ready({ feedback: bad }), /feedback/);
+  assert.deepEqual(ready({ feedback: true, viewed: true }), { type: "session.ready", feedback: true, viewed: true });
+  assert.deepEqual(ready({ viewed: false }), { type: "session.ready" });
+  for (const bad of ["true", 0, null]) assert.throws(() => ready({ viewed: bad }), /viewed/);
+});
+
 test("Live: session.ready says how many turns the server resumed, as a whole count", () => {
   assert.deepEqual(parseEvent(JSON.stringify({ type: "session.ready", protocolVersion: 1, sessionUpdate: true, resumedTurns: 3 })),
     { type: "session.ready", sessionUpdate: true, resumedTurns: 3 });
@@ -477,6 +488,171 @@ test("Live: the Korean line under an unfinished or interrupted primary line neve
   assert.equal(translatable(reply({ primaryDone: true, interrupted: true })), true);
   assert.equal(translatable(reply({ complete: true })), true);
   assert.equal(translatable(null), false);
+});
+
+/** A state showing the completed reply `r1` to "First?", ready for a second turn. */
+function answered(): LiveState {
+  const state = new LiveState();
+  state.apply(final("one", "First?"));
+  state.apply({ type: "response.started", turnId: "one", responseId: "r1" });
+  state.apply({ type: "response.completed", turnId: "one", responseId: "r1", text: "First answer.", sources: [] });
+  return state;
+}
+
+test("Live: a hold takes the answer on screen, never a draft that is still being written", () => {
+  const state = new LiveState();
+  state.apply(final("t", "Who will check?"));
+  state.apply({ type: "response.started", turnId: "t", responseId: "r" });
+  state.apply({ type: "response.delta", turnId: "t", responseId: "r", text: "I will" });
+  state.holdDisplay();
+  assert.equal(state.readingHeld, false, "nothing readable is on screen, so there is nothing to hold");
+  const shown = answered();
+  shown.apply(final("two", "Second?"));
+  shown.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  shown.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Half" });
+  shown.holdDisplay();
+  assert.equal(shown.display?.id, "r1", "the hold keeps the finished answer, not the draft");
+  shown.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: " done.", primaryDone: true });
+  assert.equal(shown.display?.id, "r1");
+  assert.equal(shown.hasNewerReply, true);
+});
+
+test("Live: continuing a session keeps a reading hold, and starting fresh drops it", () => {
+  const kept = answered();
+  kept.holdDisplay();
+  kept.restart(true);
+  assert.equal(kept.readingHeld, true);
+  assert.equal(kept.display?.id, "r1");
+  const fresh = answered();
+  fresh.holdDisplay();
+  fresh.restart(false);
+  assert.equal(fresh.readingHeld, false);
+  assert.equal(fresh.display, null);
+});
+
+test("Live: without a connection only a reply held back names the answer on screen as an earlier one", () => {
+  const state = answered();
+  state.apply(final("two", "Second?"));
+  state.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  assert.equal(state.showsEarlierAnswer(true), true, "a newer reply is being prepared");
+  assert.equal(state.showsEarlierAnswer(false), false, "a reply that is no longer coming does not count");
+  state.holdDisplay();
+  state.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Second answer.", primaryDone: true });
+  assert.equal(state.showsEarlierAnswer(false), true, "a newer reply waits behind the hold");
+});
+
+test("Live: a held primary line gains its alternative, grounding and sources when its own reply completes", () => {
+  const state = new LiveState();
+  state.apply(final("t", "Who owns the launch?"));
+  state.apply({ type: "response.started", turnId: "t", responseId: "r" });
+  state.apply({ type: "response.delta", turnId: "t", responseId: "r", text: "Alex owns it.", primaryDone: true });
+  state.holdDisplay();
+  state.apply({ type: "response.completed", turnId: "t", responseId: "r", text: "Alex owns it.", grounding: "grounded",
+    sources: [{ title: "Plan", url: "https://example.invalid/plan" }], suggestions: ["Alex owns it.", "I think Alex owns that."] });
+  assert.equal(state.readingHeld, true);
+  assert.equal(state.hasNewerReply, false);
+  assert.equal(state.display?.complete, true);
+  assert.equal(state.display?.grounding, "grounded");
+  assert.deepEqual(state.display?.sources.map(source => source.title), ["Plan"]);
+  assert.deepEqual(answers(state.display), ["Alex owns it.", "I think Alex owns that."]);
+});
+
+test("Live: decision parses only with primaryDone, and an unknown value is dropped rather than rejected", () => {
+  const delta = (extra: object) => JSON.stringify({ type: "response.delta", turnId: "t", responseId: "r", text: "Yes.", ...extra });
+  const base = { type: "response.delta", turnId: "t", responseId: "r", text: "Yes." };
+  assert.deepEqual(parseEvent(delta({ primaryDone: true, decision: "listen" })), { ...base, primaryDone: true, decision: "listen" });
+  assert.deepEqual(parseEvent(delta({ primaryDone: true, decision: "respond" })), { ...base, primaryDone: true, decision: "respond" });
+  for (const decision of ["wait", "", 1, null, true, { listen: true }])
+    assert.deepEqual(parseEvent(delta({ primaryDone: true, decision })), { ...base, primaryDone: true }, JSON.stringify(decision));
+  assert.deepEqual(parseEvent(delta({ decision: "listen" })), base, "without primaryDone");
+  assert.deepEqual(parseEvent(delta({ primaryDone: false, decision: "listen" })), base);
+});
+
+/** `answered()` with a second reply `r2` whose primary line is done with `decision`. */
+function second(state: LiveState, decision?: "respond" | "listen", id = "r2", turn = "two"): LiveState {
+  state.apply(final(turn, "Go on?"));
+  state.apply({ type: "response.started", turnId: turn, responseId: id });
+  state.apply({ type: "response.delta", turnId: turn, responseId: id, text: "Next answer.", primaryDone: true, ...decision ? { decision } : {} });
+  return state;
+}
+
+test("Live: while the other person is still talking the answer on screen stays, and the newer one waits one tap away", () => {
+  const state = second(answered(), "listen");
+  assert.equal(state.display?.id, "r1", "the screen does not swap");
+  assert.equal(state.readingHeld, true);
+  assert.equal(state.autoHeld, true);
+  assert.equal(state.hasNewerReply, true);
+  assert.equal(state.shown?.id, "r2", "the newer reply is kept, never dropped");
+  assert.equal(state.shown?.decision, "listen");
+  assert.equal(state.showsEarlierAnswer(true), false, "the answer on screen is still the one to read, so it is not dimmed");
+  state.apply({ type: "response.completed", turnId: "two", responseId: "r2", text: "Next answer.", sources: [] });
+  assert.equal(state.display?.id, "r1", "its completion does not swap the screen either");
+  state.releaseDisplay();
+  assert.equal(state.display?.id, "r2", "새 답변 보기 shows it");
+  assert.equal(state.autoHeld, false);
+
+  const first = second(new LiveState(), "listen");
+  assert.equal(first.display?.id, "r2", "with nothing on screen a listen reply is shown");
+  assert.equal(first.readingHeld, false);
+
+  const respond = second(answered(), "respond");
+  assert.equal(respond.display?.id, "r2");
+  assert.equal(respond.readingHeld, false);
+  const none = second(answered());
+  assert.equal(none.display?.id, "r2", "no decision means respond");
+});
+
+test("Live: a later reply that suits the moment ends the automatic hold, but never the user's own hold", () => {
+  const state = second(answered(), "listen");
+  second(state, "listen", "r3", "three");
+  assert.equal(state.display?.id, "r1", "another listen reply keeps the hold");
+  assert.equal(state.shown?.id, "r3");
+  second(state, "respond", "r4", "four");
+  assert.equal(state.display?.id, "r4");
+  assert.equal(state.readingHeld, false);
+  second(state, undefined, "r5", "five");
+  assert.equal(state.display?.id, "r5");
+
+  const manual = answered();
+  manual.holdDisplay();
+  second(manual, "listen");
+  assert.equal(manual.autoHeld, false, "the user's hold stays the user's");
+  second(manual, "respond", "r3", "three");
+  assert.equal(manual.display?.id, "r1", "a respond reply never releases the user's hold");
+  assert.equal(manual.readingHeld, true);
+
+  const completed = second(answered(), "listen");
+  completed.apply(final("three", "Done?"));
+  completed.apply({ type: "response.started", turnId: "three", responseId: "r3" });
+  completed.apply({ type: "response.completed", turnId: "three", responseId: "r3", text: "Done.", sources: [] });
+  assert.equal(completed.display?.id, "r3", "a reply readable only at completion releases it too");
+});
+
+test("Live: the automatic hold ends with a reset, a continued session, or the withdrawal of the reply it held back", () => {
+  const reset = second(answered(), "listen");
+  reset.resetSession();
+  assert.deepEqual([reset.readingHeld, reset.autoHeld, reset.display], [false, false, null]);
+
+  const continued = second(answered(), "listen");
+  continued.restart(true);
+  assert.equal(continued.readingHeld, false, "continuing drops the page's hold");
+  assert.equal(continued.display?.id, "r2", "and shows the newest reply");
+  const manual = answered();
+  manual.holdDisplay();
+  second(manual, "listen");
+  manual.restart(true);
+  assert.equal(manual.display?.id, "r1", "the user's hold stays when continuing");
+
+  const filteredReply = answered();
+  filteredReply.apply(final("two", "Go on?"));
+  filteredReply.apply({ type: "response.started", turnId: "two", responseId: "r2" });
+  filteredReply.apply({ type: "response.delta", turnId: "two", responseId: "r2", text: "Withheld.", primaryDone: true, decision: "listen" });
+  assert.equal(filteredReply.autoHeld, true);
+  filteredReply.apply(filtered);
+  filteredReply.apply({ type: "response.cancelled", turnId: "two", responseId: "r2" });
+  assert.equal(filteredReply.display?.id, "r1", "the answer it held stays on screen");
+  assert.deepEqual([filteredReply.readingHeld, filteredReply.autoHeld, filteredReply.hasNewerReply], [false, false, false]);
+  assert.equal(filteredReply.shown?.id, "r1");
 });
 
 test("Live: long speech is translated in bounded chunks without losing words", () => {

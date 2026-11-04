@@ -4,7 +4,7 @@ import { defaultOptions, isReplyOn, normalizeNotes, notesLimit, type ReplyOn, ty
 import type { ServerEvent } from "./protocol.js";
 
 export type ResponseMode = SessionOptions["responseMode"];
-export type DocumentMode = Exclude<ResponseMode, "conversation">;
+type DocumentMode = Exclude<ResponseMode, "conversation">;
 
 export interface LiveSettings {
   deviceId: string;
@@ -27,7 +27,7 @@ export interface LiveSettings {
 
 /** The English answer text sizes A− and A+ step through, in percent of the default size (100). */
 export const answerSizes = [85, 100, 115, 130, 150] as const;
-export type AnswerSize = typeof answerSizes[number];
+type AnswerSize = typeof answerSizes[number];
 
 function isAnswerSize(value: unknown): value is AnswerSize {
   return (answerSizes as readonly unknown[]).includes(value);
@@ -159,6 +159,14 @@ export function idleStatus(settings: Pick<LiveSettings, "topic" | "notes">): str
   return settings.topic || settings.notes
     ? "시작을 누르면 듣기 시작 · 설정은 우클릭 메뉴"
     : "시작을 누르면 듣기 시작 · '내 메모'에 내 역할과 입장을 적으면 추천이 그 입장을 따릅니다";
+}
+
+/**
+ * The hint under the quick settings before a session starts with neither a topic nor notes: next to the highlighted
+ * "내 메모" chip, it shows what one line of notes looks like. Empty when either is set.
+ */
+export function startHint(settings: Pick<LiveSettings, "topic" | "notes">): string {
+  return settings.topic || settings.notes ? "" : "'내 메모'에 내 입장을 한 줄 적어 두세요 · 예: 나는 PM, 출시 일정은 지키고 싶다";
 }
 
 /**

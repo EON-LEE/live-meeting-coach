@@ -1,7 +1,7 @@
 import type { BrowserAuth, ClientConfig } from "./auth.js";
 import { MaterialsPanel } from "./materials-panel.js";
 
-export type MaterialsAuth = Pick<BrowserAuth, "initialize" | "signIn" | "signedIn" | "knowledgeRequest">;
+type MaterialsAuth = Pick<BrowserAuth, "initialize" | "signIn" | "signedIn" | "knowledgeRequest">;
 
 export function mountMaterialsPage(auth: MaterialsAuth): void {
   const element = <T extends HTMLElement>(id: string): T => {

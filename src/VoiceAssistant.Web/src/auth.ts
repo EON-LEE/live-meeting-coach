@@ -4,7 +4,7 @@ import { CodedError } from "./errors.js";
 
 export interface ClientConfig { clientId: string; authority: string; scope: string; mode: "Fake" | "Azure"; webSocketPath: "/api/meeting"; login?: "entra" | "demo" }
 type AuthClient = Pick<PublicClientApplication, "initialize" | "loginPopup" | "acquireTokenSilent">;
-export interface DemoCredentials { username: string; password: string }
+interface DemoCredentials { username: string; password: string }
 export interface AuthDependencies {
   fetch: typeof fetch;
   location: Pick<Location, "hostname" | "protocol" | "origin">;
@@ -197,7 +197,7 @@ export class BrowserAuth {
 }
 
 /** Minimal accessible sign-in dialog shared by every page in demo-login mode. */
-export function promptDemoLogin(error: string, previousUsername = ""): Promise<DemoCredentials | null> {
+function promptDemoLogin(error: string, previousUsername = ""): Promise<DemoCredentials | null> {
   return new Promise(resolve => {
     const dialog = document.createElement("dialog");
     dialog.setAttribute("aria-labelledby", "demo-login-title");

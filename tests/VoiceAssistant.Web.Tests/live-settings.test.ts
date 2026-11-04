@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { acknowledgedSettings, answerSizes, deferredUpdateNote, documentSearchOn, idleStatus, keptNotes, liveStartOptions, noHostSources, notesChipName,
-  parseSettings, pendingUpdate, resolveAudioSource, settingsKey, stepAnswerSize, withDocumentSearch, withResponseMode, type AppliedSettings,
+  parseSettings, pendingUpdate, resolveAudioSource, settingsKey, startHint, stepAnswerSize, withDocumentSearch, withResponseMode, type AppliedSettings,
   type HostSources, type LiveSettings } from "../../src/VoiceAssistant.Web/src/live-settings.js";
 import { createStartMessage, validateUpdate } from "../../src/VoiceAssistant.Web/src/options.js";
 import { parseEvent } from "../../src/VoiceAssistant.Web/src/protocol.js";
@@ -79,6 +79,15 @@ test("Live settings: before a start, the status suggests notes only when neither
   assert.equal(idleStatus(parseSettings(JSON.stringify({ notes: " \n ", topic: "" }))), suggestion, "notes of only spaces are none");
   assert.equal(idleStatus({ ...defaults, notes: "I present the dashboard; questions are for me." }), plain);
   assert.equal(idleStatus({ ...defaults, topic: "Azure sync" }), plain);
+});
+
+test("Live settings: the start hint shows an example line of notes only while neither a topic nor notes are set", () => {
+  const hint = startHint(defaults);
+  assert.equal(hint, "'내 메모'에 내 입장을 한 줄 적어 두세요 · 예: 나는 PM, 출시 일정은 지키고 싶다");
+  assert.notEqual(hint, idleStatus(defaults), "it adds to the status line instead of repeating it");
+  assert.equal(startHint(parseSettings(JSON.stringify({ notes: " \n ", topic: "" }))), hint, "notes of only spaces are none");
+  assert.equal(startHint({ ...defaults, notes: "I present the dashboard." }), "");
+  assert.equal(startHint({ ...defaults, topic: "Azure sync" }), "");
 });
 
 test("Live settings: a document mode and its remembered choice never disagree", () => {
